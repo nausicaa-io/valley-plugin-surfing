@@ -1,0 +1,96 @@
+/**
+ * Web — an embedded browser plugin (core tier). Scaffold stage: registers the
+ * left-sidebar panel and the main-workspace browser page, backed by a
+ * session-scoped store. Later tasks add per-instance Notes tabs (one site per
+ * tab), the persistent-webview overlay, profiles + history + settings, the
+ * main-process `browser` driver, agentic `browser_*` tools and ad-blocking.
+ */
+import {
+  BROWSER_AUTOMATION_V1,
+  AGENT_TOOL_PROVIDER_V1,
+  WEB_NAVIGATOR_V1,
+  type ValleyPluginApi,
+  type ValleyPluginModule
+} from '@valley/plugin-sdk'
+import { initRuntime } from './runtime'
+import { injectStyles } from './styles'
+import { createStore, disposeStore } from './store'
+import { createBrowserAutomationService, registerWebCommands } from './commands'
+import { registerWebFences } from './embeds'
+import { ensureEmbedProviders } from './embedProviders'
+import { Page } from './Page'
+import { Panel } from './Panel'
+import { Settings } from './Settings'
+import { initLocalization, uiText } from './localization'
+import { surfingAgentTools, registerBrowserAgentCommands } from './agentTools'
+import { registerSurfingSurfaces } from './surfaces'
+
+export function register(api: ValleyPluginApi): () => void {
+  initLocalization(api)
+  initRuntime(api)
+  const disposeStyles = injectStyles()
+  const store = createStore(api)
+  store.startOverlay()
+  const ready = store.loadConfig()
+  const providersReady = ready.then(() => ensureEmbedProviders())
+  const offSurfaces = registerSurfingSurfaces(api, store, ready)
+  const offCommands = registerWebCommands(api, store)
+  const offNavigator = api.interop.services.provide(WEB_NAVIGATOR_V1, {
+    open: ({ url, title, newTab }) => {
+      const instanceId = store.openTab(url)
+      api.workspace.openMainTab({
+        instanceId,
+        title: title ?? (url.trim() || uiText('auto.6f23a36f0aa1')),
+        newTab
+      })
+    }
+  })
+  const browserAutomation = createBrowserAutomationService(api, store)
+  const offBrowserAutomation = api.interop.services.provide(BROWSER_AUTOMATION_V1, browserAutomation)
+  const offAgentCommands = registerBrowserAgentCommands(api, browserAutomation)
+  const offAgentTools = api.interop.services.provide(AGENT_TOOL_PROVIDER_V1, surfingAgentTools(browserAutomation, api))
+  let active = true
+  let offNewTab: (() => void) | null = null
+  const syncNewTabHandler = (): void => {
+    if (!active) return
+    if (store.settings.openWebsiteOnNewTab && !offNewTab) {
+      offNewTab = api.workspace.registerNewTabHandler(({ paneId }) => {
+        const instanceId = store.openTab('')
+        api.workspace.openMainTab({
+          instanceId,
+          title: uiText('auto.6f23a36f0aa1'),
+          newTab: true,
+          paneId
+        })
+      })
+    } else if (!store.settings.openWebsiteOnNewTab && offNewTab) {
+      offNewTab()
+      offNewTab = null
+    }
+  }
+  const offNewTabSetting = store.subscribe(syncNewTabHandler)
+  void ready.then(syncNewTabHandler)
+  const offFences = registerWebFences(providersReady)
+
+  api.registerView('surfing.page', Page)
+  api.registerView('surfing.panel', Panel)
+  api.registerView('surfing.settings', Settings)
+
+  return () => {
+    active = false
+    offNewTabSetting()
+    offNewTab?.()
+    offNavigator()
+    offBrowserAutomation()
+    offAgentTools()
+    offAgentCommands()
+    offSurfaces()
+    offCommands()
+    offFences()
+    disposeStore(api, store)
+    disposeStyles()
+  }
+}
+
+const plugin: ValleyPluginModule = { register }
+export default plugin

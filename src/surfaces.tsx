@@ -1,0 +1,164 @@
+import { METADATA_PANEL_SEGMENT_V1, PLUGIN_SURFACE_V1, type PluginInspectionSubject, type PluginProperty, type ValleyPluginApi } from '@valley/plugin-sdk'
+import { api, React } from './runtime'
+import type { WebStore } from './store'
+import { canDeleteProfile, INCOGNITO_PROFILE_ID } from './profiles'
+import { EyeglassesIcon } from './icons'
+import { uiText } from './localization'
+
+const object = (raw: unknown): Record<string, unknown> => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(uiText('surfing.error.input'))
+  return raw as Record<string, unknown>
+}
+const required = (value: unknown, key: string): string => {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(uiText('surfing.error.required', { value: key }))
+  return value.trim()
+}
+const safeUrl = (raw: unknown): string => {
+  const value = required(raw, 'url')
+  const url = new URL(value)
+  if (!['https:', 'http:'].includes(url.protocol)) throw new Error(uiText('surfing.error.url'))
+  return url.href
+}
+const schema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false })
+const string = { type: 'string', minLength: 1 }
+
+function profileFor(store: WebStore, id: string) {
+  const profile = store.getSnapshot().profiles.find((item) => item.id === id)
+  if (!profile) throw new Error(uiText('surfing.error.profile'))
+  return profile
+}
+
+function inspectProfile(store: WebStore, subject?: PluginInspectionSubject): PluginProperty[] {
+  const profileId = String(subject?.item?.state.profileId ?? subject?.view.profileId ?? store.getSnapshot().activeProfileId)
+  const profile = profileFor(store, profileId)
+  return [
+    { id: 'profileId', label: uiText('surfing.surface.profile'), value: profile.id, readOnly: true },
+    { id: 'private', label: uiText('surfing.surface.private'), value: profile.private === true, readOnly: true },
+    { id: 'hidden', label: uiText('surfing.surface.hidden'), value: String(profile.hidden === true), readOnly: true }
+  ]
+}
+
+function websiteTarget(store: WebStore, subject?: PluginInspectionSubject) {
+  const directId = subject?.instanceId ?? '__single'
+  const direct = store.getTab(directId)
+  if (direct) return { id: directId, tab: direct }
+  const url = subject?.item?.state.url
+  const profileId = subject?.item?.state.profileId ?? subject?.view.profileId
+  const match = Object.entries(store.getSnapshot().tabs).find(([, tab]) =>
+    (typeof url !== 'string' || tab.url === url) && (typeof profileId !== 'string' || tab.profileId === profileId)
+  )
+  return match ? { id: match[0], tab: match[1] } : null
+}
+
+function inspectWebsite(store: WebStore, subject?: PluginInspectionSubject): PluginProperty[] {
+  const tab = websiteTarget(store, subject)?.tab
+  if (!tab) throw new Error(uiText('surfing.error.closedTab'))
+  const metadata = tab.metadata ?? {}
+  let security = uiText('surfing.security.unavailable')
+  try {
+    security = new URL(tab.url).protocol === 'https:'
+      ? uiText('surfing.security.secure')
+      : uiText('surfing.security.notSecure')
+  } catch {
+    security = uiText('surfing.security.unavailable')
+  }
+  return [
+    { id: 'title', label: uiText('surfing.surface.title'), value: tab.title, readOnly: true },
+    { id: 'url', label: uiText('surfing.surface.url'), value: tab.url, readOnly: true },
+    { id: 'security', label: uiText('surfing.surface.security'), value: security, readOnly: true },
+    ...(metadata.icon ? [
+      { id: 'icon', label: uiText('surfing.surface.icon'), value: metadata.icon, readOnly: true },
+      { id: 'iconUrl', label: uiText('surfing.surface.websiteIcon'), value: metadata.icon, readOnly: true }
+    ] : []),
+    ...(metadata.language ? [{ id: 'language', label: uiText('surfing.surface.language'), value: metadata.language, readOnly: true }] : [])
+  ]
+}
+
+function Properties({ store, subject, kind }: { store: WebStore; subject?: PluginInspectionSubject; kind: 'profile' | 'website' }): React.ReactElement {
+  const snapshot = React.useSyncExternalStore(store.subscribe, store.getSnapshot)
+  const [fields, setFields] = React.useState<PluginProperty[]>([])
+  const [error, setError] = React.useState('')
+  React.useEffect(() => {
+    try { setFields(kind === 'profile' ? inspectProfile(store, subject) : inspectWebsite(store, subject)); setError('') } catch { setFields([]); setError(uiText('surfing.surface.missing')) }
+  }, [snapshot, store, subject, kind])
+  const readOnlyValue = (field: PluginProperty): React.ReactNode => {
+    const value = String(field.value ?? '')
+    if (kind === 'website' && field.id === 'icon') return <span className="web-metadata-icon"><img src={value} alt="" referrerPolicy="no-referrer" /></span>
+    if (typeof field.value === 'boolean') return api.ui.t(field.value ? 'common.yes' : 'common.no')
+    return value
+  }
+  return <div className="right-panel-body props-info">{error && <p role="alert">{error}</p>}<dl className="props-info-table">{fields.map((field) => <div className="props-info-row" key={field.id}>
+    <dt className="props-info-key">{field.label}</dt><dd className="props-info-value">
+    {readOnlyValue(field)}
+    </dd>
+  </div>)}</dl></div>
+}
+
+export function registerSurfingSurfaces(pluginApi: ValleyPluginApi, store: WebStore, ready: Promise<void>): () => void {
+  const surfaces = ['main_workspace', 'left_sidebar'] as const
+  const offs = surfaces.map((surface) => pluginApi.interop.extensions.provide(PLUGIN_SURFACE_V1, {
+    id: `surfing.${surface}`, surface, subscribe: store.subscribe,
+    getSnapshot: (instanceId) => {
+      const snapshot = store.getSnapshot()
+      const tab = surface === 'main_workspace' ? store.getTab(instanceId ?? '__single') : undefined
+      const profile = profileFor(store, tab?.profileId ?? snapshot.activeProfileId)
+      const view = { profileId: profile.id }
+      const readingAction = tab?.url && !profile.private ? [{
+        id: 'reading-list',
+        label: uiText('surfing.readingList.add'),
+        icon: <EyeglassesIcon />,
+        onSelect: async () => {
+          await store.ensureProfileLoaded(profile.id)
+          await store.addToReadingList(profile.id, { url: tab.url, title: tab.title, ts: Date.now() })
+        }
+      }] : []
+      return { title: profile.private ? profile.name : tab?.title || tab?.url || profile.name, view,
+        ...(tab && tab.url && !profile.private ? { item: { id: JSON.stringify([profile.id, tab.url]), title: tab.title || tab.url, state: { ...view, url: tab.url, title: tab.title } } }
+          : surface === 'left_sidebar' ? { item: { id: profile.id, title: profile.name, state: view } } : {}),
+        ...(surface === 'main_workspace' ? { bookmarkTargets: { item: false }, actions: readingAction } : {}),
+        ...(tab ? { navigation: { canGoBack: store.canGoBack(instanceId ?? '__single'), canGoForward: store.canGoForward(instanceId ?? '__single'), goBack: () => store.goBack(instanceId ?? '__single'), goForward: () => store.goForward(instanceId ?? '__single') } } : {})
+      }
+    },
+    restore: async (state, instanceId) => {
+      await ready
+      const profileId = required(state.profileId, 'profileId')
+      const profile = profileFor(store, profileId)
+      if (surface === 'left_sidebar') { store.setActiveProfile(profileId); return }
+      store.restoreTab(instanceId ?? '__single', { url: state.url !== undefined && !profile.private ? safeUrl(state.url) : '', title: typeof state.title === 'string' && !profile.private ? state.title : '', profileId })
+    }
+  }))
+  offs.push(pluginApi.interop.extensions.provide(METADATA_PANEL_SEGMENT_V1, { id: 'surfing.websiteProperties', label: 'Website metadata', labelKey: 'surfing.metadata.website', icon: 'globe', pluginSurfaces: ['main_workspace'], inspect: ({ subject }) => inspectWebsite(store, subject), render: ({ subject }) => <Properties store={store} subject={subject} kind="website" /> }))
+  offs.push(pluginApi.interop.extensions.provide(METADATA_PANEL_SEGMENT_V1, { id: 'surfing.profileProperties', label: 'Profile metadata', labelKey: 'surfing.metadata.profile', icon: 'user', pluginSurfaces: ['main_workspace'], inspect: ({ subject }) => inspectProfile(store, subject), render: ({ subject }) => <Properties store={store} subject={subject} kind="profile" /> }))
+  const profileInput = { schema: schema({ profileId: string }, ['profileId']), parse: (raw: unknown) => ({ profileId: required(object(raw).profileId, 'profileId') }) }
+  offs.push(pluginApi.commands.register({ id: 'list-profiles', label: 'Surfing: List browser profiles', labelKey: 'surfing.command.listProfiles', sideEffect: 'read', paletteSafe: false, run: async () => { await ready; return store.getSnapshot().profiles } }))
+  offs.push(pluginApi.commands.register({ id: 'create-profile', label: 'Surfing: Create a browser profile', labelKey: 'surfing.command.createProfile', sideEffect: 'write', paletteSafe: false, input: { schema: schema({ name: string }, ['name']), parse: (raw) => ({ name: required(object(raw).name, 'name') }) }, preview: (input) => input, run: async ({ name }) => { await ready; const id = store.addProfile(name); await store.flushProfiles(); return { value: profileFor(store, id), revert: null } } }))
+  offs.push(pluginApi.commands.register({ id: 'delete-profile', label: 'Surfing: Delete a browser profile', labelKey: 'surfing.command.deleteProfile', sideEffect: 'write', paletteSafe: false, input: profileInput, preview: (input) => input, revision: ({ profileId }) => profileFor(store, profileId), run: async ({ profileId }) => {
+    profileFor(store, profileId)
+    if (profileId === INCOGNITO_PROFILE_ID) throw new Error(uiText('surfing.error.incognito'))
+    if (!canDeleteProfile(store.getSnapshot().profiles, profileId)) throw new Error(uiText('surfing.error.lastProfile'))
+    await store.deleteProfile(profileId); return { value: { profileId }, revert: null }
+  } }))
+  for (const operation of ['clear-history', 'clear-browser-data'] as const) offs.push(pluginApi.commands.register({ id: operation, label: operation === 'clear-history' ? 'Surfing: Clear browser history' : 'Surfing: Clear browser data', labelKey: `surfing.command.${operation}`, sideEffect: 'write', paletteSafe: false, input: profileInput, preview: (input) => input, run: async ({ profileId }) => { profileFor(store, profileId); if (operation === 'clear-history') await store.clearHistory(profileId); else await store.clearBrowserData(profileId); return { value: { profileId }, revert: null } } }))
+  offs.push(pluginApi.commands.register({ id: 'read-history', label: 'Surfing: Read browser history', labelKey: 'surfing.command.readHistory', sideEffect: 'read', paletteSafe: false, input: profileInput, run: async ({ profileId }) => { profileFor(store, profileId); return store.readHistory(profileId) } }))
+  const pageInput = { schema: schema({ profileId: string, kind: { type: 'string', enum: ['favorite', 'reading'] }, url: string, title: { type: 'string' } }, ['profileId', 'kind', 'url']), parse: (raw: unknown) => {
+    const value = object(raw); if (!['favorite', 'reading'].includes(String(value.kind))) throw new Error(uiText('surfing.error.invalid', { value: 'kind' }))
+    return { profileId: required(value.profileId, 'profileId'), kind: value.kind as 'favorite' | 'reading', url: safeUrl(value.url), title: typeof value.title === 'string' ? value.title : '' }
+  } }
+  for (const operation of ['save-page', 'remove-page'] as const) offs.push(pluginApi.commands.register({ id: operation, label: operation === 'save-page' ? 'Surfing: Save a page' : 'Surfing: Remove a saved page', labelKey: `surfing.command.${operation}`, sideEffect: 'write', paletteSafe: false, input: pageInput, preview: (input) => input, run: async ({ profileId, kind, url, title }) => {
+    profileFor(store, profileId); await store.ensureProfileLoaded(profileId)
+    if (kind === 'favorite') {
+      if (operation === 'remove-page') await store.removeFavorite(profileId, url)
+      else if (!store.isFavorite(profileId, url)) await store.toggleFavorite(profileId, { url, title, ts: Date.now() })
+    } else if (operation === 'remove-page') await store.removeFromReadingList(profileId, url)
+    else await store.addToReadingList(profileId, { url, title, ts: Date.now() })
+    return { value: { profileId, kind, url }, revert: null }
+  } }))
+  offs.push(pluginApi.commands.register({ id: 'list-saved-pages', label: 'Surfing: List saved pages', labelKey: 'surfing.command.listSavedPages', sideEffect: 'read', paletteSafe: false, input: { schema: schema({ profileId: string, cursor: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 1000, default: 100 } }, ['profileId']), parse: (raw) => {
+    const value = object(raw)
+    const limit = value.limit ?? 100
+    if (!Number.isSafeInteger(limit) || Number(limit) < 1 || Number(limit) > 1000) throw new Error(uiText('surfing.error.invalid', { value: 'limit (1–1000)' }))
+    if (value.cursor !== undefined && typeof value.cursor !== 'string') throw new Error(uiText('surfing.error.invalid', { value: 'cursor' }))
+    return { profileId: required(value.profileId, 'profileId'), cursor: value.cursor as string | undefined, limit: Number(limit) }
+  } }, run: async ({ profileId, cursor, limit }) => { await ready; profileFor(store, profileId); return pluginApi.data.dataset('surfing.saved_pages').query({ where: { profileId }, cursor, limit }) } }))
+  return () => offs.forEach((off) => off())
+}
