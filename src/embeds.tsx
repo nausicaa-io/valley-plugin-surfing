@@ -386,7 +386,7 @@ function renderEmbed(el: HTMLElement, url: string, requestedHeight?: number, pro
           }
           fitGuestWidth()
           widthObserver?.disconnect()
-          widthObserver = new ResizeObserver(fitGuestWidth)
+          widthObserver = new (window as Window & typeof globalThis).ResizeObserver(fitGuestWidth)
           widthObserver.observe(body)
         }
         const prepare = provider?.presentation.fullWidth && webview.executeJavaScript
