@@ -1,5 +1,6 @@
-import { uiText } from './localization'
+import { createUiText, uiText } from './localization'
 import type { BrowserAutomationService, BrowserActionResult, ValleyPluginApi } from '@valley/plugin-sdk'
+import type { TextDocumentRead } from '@valley/plugin-sdk/types'
 import type { WebStore } from './store'
 import { Readability } from '@mozilla/readability'
 import DOMPurify from 'dompurify'
@@ -69,17 +70,26 @@ export function createBrowserAutomationService(
 async function clippingPath(
   api: ValleyPluginApi,
   title: string,
-  collision: 'keep-both' | 'overwrite' | 'cancel'
-): Promise<{ relPath: string; previous: string | null } | null> {
+  collision: 'keep-both' | 'overwrite' | 'cancel',
+  assertActive: () => void
+): Promise<{ relPath: string; previous: TextDocumentRead | null } | null> {
   const stem = safeClipName(title)
   const initial = `Clippings/${stem}.md`
   const exists = await api.vault.stat(initial)
+  assertActive()
   if (!exists) return { relPath: initial, previous: null }
   if (collision === 'cancel') return null
-  if (collision === 'overwrite') return { relPath: initial, previous: await api.vault.readFile(initial) }
+  if (collision === 'overwrite') {
+    const previous = await api.vault.readTextDocument(initial)
+    assertActive()
+    if (!previous) throw new Error(createUiText(api)('surfing.error.readPage'))
+    return { relPath: initial, previous }
+  }
   for (let index = 2; index < 10_000; index++) {
     const relPath = `Clippings/${stem} (${index}).md`
-    if (!(await api.vault.stat(relPath))) return { relPath, previous: null }
+    const occupied = await api.vault.stat(relPath)
+    assertActive()
+    if (!occupied) return { relPath, previous: null }
   }
   throw new Error(uiText('surfing.error.clipName'))
 }
@@ -88,7 +98,24 @@ async function clippingPath(
  * Register the user-facing `web:*` command-bus commands for ⌘P and CLI. Plugin
  * automation uses the separately registered `browser.automation` service.
  */
-export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () => void {
+export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () => Promise<void> {
+  const uiText = createUiText(api)
+  const root = api.getState().vault?.path
+  const pending = new Set<Promise<unknown>>()
+  let active = true
+  let revoked = false
+  let disposal: Promise<void> | undefined
+  const offVault = api.subscribeState(['vault'], ({ state }) => { if (state.vault?.path !== root) revoked = true })
+  const assertActive = (): void => {
+    if (!active || revoked || api.getState().vault?.path !== root) throw new Error(uiText('surfing.error.saveClip'))
+  }
+  const accept = <T>(operation: () => Promise<T>): Promise<T> => {
+    try { assertActive() } catch (error) { return Promise.reject(error) }
+    const task = Promise.resolve().then(operation)
+    pending.add(task)
+    void task.then(() => pending.delete(task), () => pending.delete(task))
+    return task
+  }
   const browser = createBrowserAutomationService(api, store)
   const offs = [
     api.commands.register({
@@ -213,8 +240,10 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
         if (!page.ok) throw new Error(page.error || uiText('surfing.error.closedTab'))
         return page.data
       },
-      run: async ({ instanceId, collision }) => {
+      run: ({ instanceId, collision }) => accept(async () => {
+        assertActive()
         const response = await store.browserReadHtml(instanceId)
+        assertActive()
         if (!response.ok || !response.data?.html) throw new Error(response.error || uiText('surfing.error.readPage'))
         const document = new DOMParser().parseFromString(response.data.html, 'text/html')
         const base = document.createElement('base')
@@ -229,7 +258,7 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
         const markdown = turndown.turndown(cleanHtml).trim()
         if (!markdown) throw new Error(uiText('surfing.error.noArticle'))
         const title = article.title?.trim() || response.data.title.trim() || 'Untitled clipping'
-        const target = await clippingPath(api, title, collision)
+        const target = await clippingPath(api, title, collision, assertActive)
         if (!target) return { value: { cancelled: true as const }, revert: null }
         const content = [
           '---',
@@ -243,25 +272,47 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
           markdown,
           ''
         ].join('\n')
-        if (!(await api.vault.writeFile(target.relPath, content))) throw new Error(uiText('surfing.error.saveClip'))
+        assertActive()
+        const written = target.previous
+          ? await api.vault.writeTextDocumentGuarded(target.relPath, content, target.previous.revisionToken)
+          : await api.vault.createTextDocumentGuarded(target.relPath, content)
+        if (!written.ok) throw new Error(uiText('surfing.error.saveClip'))
+        let receipt = 'revisionToken' in written ? written.revisionToken : null
+        let state: 'applied' | 'reverted' | 'pending' = 'applied'
+        const replay = (direction: 'undo' | 'redo'): Promise<void> => accept(async () => {
+          assertActive()
+          const expected = direction === 'undo' ? 'applied' : 'reverted'
+          const key = direction === 'undo' ? 'surfing.error.restorePrevious' : 'surfing.error.restoreClip'
+          if (state !== expected || ((direction === 'undo' || target.previous) && !receipt)) throw new Error(uiText(key))
+          state = 'pending'
+          if (target.previous) {
+            const token = receipt!
+            receipt = null
+            const result = await api.vault.writeTextDocumentGuarded(target.relPath, direction === 'undo' ? target.previous.content : content, token)
+            if (!result.ok) throw new Error(uiText(key))
+            receipt = result.revisionToken
+          } else if (direction === 'undo') {
+            const token = receipt!
+            receipt = null
+            const removed = await api.vault.trashTextDocumentGuarded(target.relPath, token)
+            if (!removed.ok) throw new Error(uiText('surfing.error.deleteClip'))
+            if (removed.editorConflict || !removed.recoverySaved) throw new Error(uiText(removed.recoverySaved ? 'surfing.error.deletedWithDraft' : 'surfing.error.deletedRecoveryFailed'), { cause: removed })
+          } else {
+            const created = await api.vault.createTextDocumentGuarded(target.relPath, content)
+            if (!created.ok) throw new Error(uiText(key))
+            receipt = created.revisionToken
+          }
+          state = direction === 'undo' ? 'reverted' : 'applied'
+        })
         return {
           value: { relPath: target.relPath, url: response.data.url, title },
           revert: {
             label: `Clip ${title}`,
-            run: async () => {
-              if (target.previous !== null) {
-                if (!(await api.vault.writeFile(target.relPath, target.previous))) throw new Error(uiText('surfing.error.restorePrevious'))
-              } else {
-                const removed = await api.drivers.notes.deleteMarkdown({ relPath: target.relPath })
-                if (!removed.ok) throw new Error(removed.error || uiText('surfing.error.deleteClip'))
-              }
-            },
-            reapply: async () => {
-              if (!(await api.vault.writeFile(target.relPath, content))) throw new Error(uiText('surfing.error.restoreClip'))
-            }
+            run: () => replay('undo'),
+            reapply: () => replay('redo')
           }
         }
-      },
+      }),
       formatCli: (value) => {
         const result = value as { cancelled?: boolean; relPath?: string }
         return result.cancelled ? 'Clipping cancelled.' : `Clipped page to ${result.relPath}.`
@@ -269,6 +320,10 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
     })
   ]
   return () => {
+    if (disposal) return disposal
+    active = false
+    offVault()
     for (const off of offs) off()
+    return disposal = Promise.allSettled([...pending]).then(() => {})
   }
 }

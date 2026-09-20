@@ -26,13 +26,15 @@ import { watchBrowserCosmetics } from './browserCosmetics'
 import codeBlockExamples from './codeBlockExamples.json'
 import { api, React } from './runtime'
 import { fenceInt, parseFenceParams } from '@valley/plugin-sdk/fenceParams'
-import type { PlaybackSource, PluginPlaybackHandle, PluginBrowserGuestEvent } from '@valley/plugin-sdk'
+import type { PlaybackSource, PluginPlaybackHandle, PluginBrowserGuestEvent, PluginCodeBlockClaim } from '@valley/plugin-sdk'
 import { partitionFor } from './profiles'
 import { getStore } from './store'
 import { uiText } from './localization'
 import {
   EMBEDS_REL_DIR,
+  WEB_FENCE_LANGUAGE,
   loadEmbedProviders,
+  reservedEmbedLanguages,
   type EmbedProvider,
   type EmbedProviderConfiguration
 } from './embedProviders'
@@ -70,9 +72,9 @@ function ensureStyles(document: Document): void {
   document.head.appendChild(style)
 }
 
-function activeEmbedTheme(): 'light' | 'reading' | 'dark' {
+function activeEmbedTheme(): 'light' | 'dark' {
   const theme = document.documentElement.dataset.theme
-  if (theme === 'light' || theme === 'reading' || theme === 'dark') return theme
+  if (theme === 'light' || theme === 'dark') return theme
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
@@ -456,7 +458,7 @@ const heightOf = (code: string): number | undefined => fenceInt(parseFenceParams
 /** Register the plugin's own fence plus one per provider. */
 export function registerWebFences(initialProviders: Promise<EmbedProviderConfiguration> = loadEmbedProviders()): () => void {
   let active = true
-  const offBase = api.markdown.registerCodeBlockRenderer('surfing', (code, el, ctx) => {
+  const offBase = api.markdown.registerCodeBlockRenderer(WEB_FENCE_LANGUAGE, (code, el, ctx) => {
     const params = parseFenceParams(code)
     const url = (params.values.url ?? params.bare ?? ctx.meta ?? '').trim()
     return renderEmbed(el, url, heightOf(code), undefined, undefined, ctx.path)
@@ -464,8 +466,10 @@ export function registerWebFences(initialProviders: Promise<EmbedProviderConfigu
 
   let providerDisposers: (() => void)[] = []
   let lastSignature = ''
-  const applyProviders = ({ providers, rendererStamp }: Awaited<ReturnType<typeof loadEmbedProviders>>): void => {
+  const applyProviders = ({ providers, rendererStamp }: EmbedProviderConfiguration, claims: readonly PluginCodeBlockClaim[]): void => {
     if (!active) return
+    const reserved = reservedEmbedLanguages(claims)
+    providers = providers.filter(provider => !reserved.has(provider.language.toLowerCase()))
     const signature = JSON.stringify([providers, rendererStamp ?? ''])
     if (signature === lastSignature) return
     lastSignature = signature
@@ -480,16 +484,57 @@ export function registerWebFences(initialProviders: Promise<EmbedProviderConfigu
       ] })
     )
   }
-  void initialProviders.then(applyProviders)
+  const claimSignature = (claims: readonly PluginCodeBlockClaim[]): string => JSON.stringify([...reservedEmbedLanguages(claims)].sort())
+  let lastClaimsSignature = ''
+  let revision = 0
+  let pending = false
+  let running = false
+  let initial: Promise<EmbedProviderConfiguration> | undefined = initialProviders
+  const refresh = (): void => {
+    revision++
+    pending = true
+    if (running) return
+    running = true
+    void (async () => {
+      try {
+        while (active && pending) {
+          pending = false
+          const currentRevision = revision
+          const source = initial
+          initial = undefined
+          const [configuration, claims] = await Promise.all([
+            source ?? loadEmbedProviders(),
+            api.markdown.listCodeBlockClaims()
+          ])
+          if (!active || currentRevision !== revision) continue
+          lastClaimsSignature = claimSignature(claims)
+          applyProviders(configuration, claims)
+        }
+      } catch (error) {
+        if (active) console.error('Could not refresh embed providers:', error)
+      } finally {
+        running = false
+        if (active && pending) refresh()
+      }
+    })()
+  }
+  const offClaims = api.markdown.onCodeBlockClaimsChanged((claims) => {
+    const signature = claimSignature(claims)
+    if (signature === lastClaimsSignature) return
+    lastClaimsSignature = signature
+    refresh()
+  })
+  refresh()
   const offProviders = api.data.files.onChanged((relPath) => {
     if (relPath === EMBEDS_REL_DIR || relPath.startsWith(`${EMBEDS_REL_DIR}/`)) {
-      void loadEmbedProviders().then(applyProviders)
+      refresh()
     }
   })
 
   return () => {
     active = false
     offBase()
+    offClaims()
     offProviders()
     for (const off of providerDisposers) off()
     providerDisposers = []

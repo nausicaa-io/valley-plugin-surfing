@@ -189,7 +189,7 @@ describe('Surfing Settings → Embeds', () => {
       files: {
         'Research/Embed Demo.md': '```youtube\nhttps://www.youtube.com/watch?v=UF8uR6Z6KLc\n```\n\n```X\nhttps://x.com/jack/status/20\n```',
         '.valley/plugins/data/surfing/embeds/youtube/provider.json': JSON.stringify({ schemaVersion: 1, id: 'youtube', displayName: 'YouTube', language: 'youtube', template: 'https://www.youtube.com/embed/{value}', kind: 'youtube', valueParser: 'youtube-video-id', presentation: { initialHeight: 360, autoSize: false, fullWidth: true, aspectRatio: '16 / 9', httpReferrer: 'https://localhost/' }, order: 10 }),
-        '.valley/plugins/data/surfing/embeds/x/provider.json': JSON.stringify({ schemaVersion: 1, id: 'x', displayName: 'X', language: 'X', template: 'https://platform.twitter.com/embed/Tweet.html?id={value}', kind: 'x', valueParser: 'x-post-id', presentation: { initialHeight: 180, autoSize: true, fullWidth: true, minHeight: 180, maxHeight: 1200, fitWidth: { naturalWidth: 515, maxScale: 1.3 } }, theme: { queryParameter: 'theme', values: { light: 'light', reading: 'light', dark: 'dark' } }, order: 20 })
+        '.valley/plugins/data/surfing/embeds/x/provider.json': JSON.stringify({ schemaVersion: 1, id: 'x', displayName: 'X', language: 'X', template: 'https://platform.twitter.com/embed/Tweet.html?id={value}', kind: 'x', valueParser: 'x-post-id', presentation: { initialHeight: 180, autoSize: true, fullWidth: true, minHeight: 180, maxHeight: 1200, fitWidth: { naturalWidth: 515, maxScale: 1.3 } }, theme: { queryParameter: 'theme', values: { light: 'light', dark: 'dark' } }, order: 20 })
       }
     })
     const dispose = register(mock.api)

@@ -192,8 +192,8 @@
   "surfing.embedValidation.fit": "La configuración de ajuste de ancho debe ser un objeto.",
   "surfing.embedValidation.fitFields": "El ajuste de ancho necesita valores válidos de naturalWidth y maxScale.",
   "surfing.embedValidation.theme": "La configuración del tema debe ser un objeto.",
-  "surfing.embedValidation.themeFields": "La configuración del tema necesita queryParameter y valores light, reading y dark.",
-  "surfing.embedValidation.themeValues": "La configuración del tema necesita valores no vacíos para light, reading y dark.",
+  "surfing.embedValidation.themeFields": "La configuración del tema necesita queryParameter y valores light y dark.",
+  "surfing.embedValidation.themeValues": "La configuración del tema necesita valores no vacíos para light y dark.",
   "surfing.embedValidation.definition": "La definición del proveedor debe ser un objeto JSON.",
   "surfing.embedValidation.identity": "El proveedor necesita schemaVersion 1 y valores válidos de id, displayName y language; id debe coincidir con su directorio.",
   "surfing.embedValidation.reserved": "El lenguaje «{{value}}» está reservado.",
@@ -210,5 +210,7 @@
   "surfing.embedValidation.missingFile": "El directorio del proveedor necesita {{value}}.",
   "surfing.embedValidation.unique": "Los id y lenguajes de los proveedores deben ser únicos.",
   "surfing.embedValidation.custom": "Proveedor personalizado",
-  "surfing.embed.customize": "Personalizar"
+  "surfing.embed.customize": "Personalizar",
+  "surfing.error.deletedWithDraft": "El archivo se eliminó. El texto más reciente del editor se conservó para recuperarlo; guárdalo antes de continuar.",
+  "surfing.error.deletedRecoveryFailed": "El archivo se eliminó, pero no se pudo guardar el texto más reciente del editor para recuperarlo. Mantén el editor abierto y guarda ese texto antes de continuar."
 }

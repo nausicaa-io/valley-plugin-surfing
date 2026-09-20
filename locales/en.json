@@ -192,8 +192,8 @@
   "surfing.embedValidation.fit": "Fit-width configuration must be an object.",
   "surfing.embedValidation.fitFields": "Fit-width configuration needs a valid naturalWidth and maxScale.",
   "surfing.embedValidation.theme": "Theme configuration must be an object.",
-  "surfing.embedValidation.themeFields": "Theme configuration needs a queryParameter and light, reading, and dark values.",
-  "surfing.embedValidation.themeValues": "Theme configuration needs non-empty light, reading, and dark values.",
+  "surfing.embedValidation.themeFields": "Theme configuration needs a queryParameter and values for light and dark.",
+  "surfing.embedValidation.themeValues": "Theme configuration needs non-empty light and dark values.",
   "surfing.embedValidation.definition": "The provider definition must be a JSON object.",
   "surfing.embedValidation.identity": "The provider needs schemaVersion 1 and valid id, displayName, and language values; id must match its directory.",
   "surfing.embedValidation.reserved": "The language “{{value}}” is reserved.",
@@ -210,5 +210,7 @@
   "surfing.embedValidation.missingFile": "The provider directory needs {{value}}.",
   "surfing.embedValidation.unique": "Provider ids and languages must be unique.",
   "surfing.embedValidation.custom": "Custom provider",
-  "surfing.embed.customize": "Customize"
+  "surfing.embed.customize": "Customize",
+  "surfing.error.deletedWithDraft": "The file was deleted. Newer editor text was preserved for recovery; save it before continuing.",
+  "surfing.error.deletedRecoveryFailed": "The file was deleted, but newer editor text could not be saved for recovery. Keep the editor open and save that text before continuing."
 }

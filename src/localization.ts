@@ -16,7 +16,11 @@ let translate: ValleyPluginApi['ui']['t'] = english
 
 export function initLocalization(api: ValleyPluginApi): void {
   api.ui.registerCatalogs(catalogs)
-  translate = (key, params) => {
+  translate = createUiText(api)
+}
+
+export function createUiText(api: ValleyPluginApi): ValleyPluginApi['ui']['t'] {
+  return (key, params) => {
     const value = api.ui.t(key, params)
     return value === key ? english(key, params) : value
   }

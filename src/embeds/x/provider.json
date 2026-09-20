@@ -21,7 +21,6 @@
     "queryParameter": "theme",
     "values": {
       "light": "light",
-      "reading": "light",
       "dark": "dark"
     }
   },

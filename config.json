@@ -1,6 +1,7 @@
 {
   "icon": "globe",
   "main": "runtime/index.js",
+  "indexState": "scoped",
   "keepTabIcon": true,
   "showOnNewTab": true,
   "uiSlots": {

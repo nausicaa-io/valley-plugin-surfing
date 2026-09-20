@@ -192,8 +192,8 @@
   "surfing.embedValidation.fit": "La configuration d’ajustement à la largeur doit être un objet.",
   "surfing.embedValidation.fitFields": "L’ajustement à la largeur nécessite des valeurs valides pour naturalWidth et maxScale.",
   "surfing.embedValidation.theme": "La configuration du thème doit être un objet.",
-  "surfing.embedValidation.themeFields": "La configuration du thème nécessite queryParameter et les valeurs light, reading et dark.",
-  "surfing.embedValidation.themeValues": "La configuration du thème nécessite des valeurs non vides pour light, reading et dark.",
+  "surfing.embedValidation.themeFields": "La configuration du thème nécessite queryParameter et les valeurs light et dark.",
+  "surfing.embedValidation.themeValues": "La configuration du thème nécessite des valeurs non vides pour light et dark.",
   "surfing.embedValidation.definition": "La définition du fournisseur doit être un objet JSON.",
   "surfing.embedValidation.identity": "Le fournisseur nécessite schemaVersion 1 et des valeurs valides pour id, displayName et language ; id doit correspondre au dossier.",
   "surfing.embedValidation.reserved": "Le langage « {{value}} » est réservé.",
@@ -210,5 +210,7 @@
   "surfing.embedValidation.missingFile": "Le dossier du fournisseur nécessite {{value}}.",
   "surfing.embedValidation.unique": "Les identifiants et langages des fournisseurs doivent être uniques.",
   "surfing.embedValidation.custom": "Fournisseur personnalisé",
-  "surfing.embed.customize": "Personnaliser"
+  "surfing.embed.customize": "Personnaliser",
+  "surfing.error.deletedWithDraft": "Le fichier a été supprimé. Le texte plus récent de l’éditeur a été conservé pour récupération ; enregistrez-le avant de continuer.",
+  "surfing.error.deletedRecoveryFailed": "Le fichier a été supprimé, mais le texte plus récent de l’éditeur n’a pas pu être sauvegardé pour récupération. Gardez l’éditeur ouvert et enregistrez ce texte avant de continuer."
 }

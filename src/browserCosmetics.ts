@@ -10,22 +10,34 @@ const FEATURES = `(() => {
   return {url:location.href,classes:[...classes],ids:[...ids],hrefs:[...hrefs]};
 })()`
 
-export function watchBrowserCosmetics(api: ValleyPluginApi, guestId: string, partition: string): () => void {
+export function watchBrowserCosmetics(api: ValleyPluginApi, guestId: string, partition: string, owner: {
+  active(): boolean
+  revision(): number
+} = { active: () => true, revision: () => 0 }): () => Promise<void> {
   let active = true
   let pending = false
   let initial = true
   let previous = ''
+  let generation = 0
   const styles = new Set<string>()
+  const work = new Set<Promise<unknown>>()
+  let disposal: Promise<void> | undefined
+  const track = (operation: Promise<unknown>): void => {
+    work.add(operation)
+    void operation.then(() => work.delete(operation), () => work.delete(operation))
+  }
   const update = async (): Promise<void> => {
-    if (!active || pending) return
+    if (!active || !owner.active() || pending) return
     pending = true
+    const revision = owner.revision(), acceptedGeneration = generation
+    const current = (): boolean => active && owner.active() && revision === owner.revision() && generation === acceptedGeneration
     try {
       const features = await api.drivers.browser.execute(guestId, FEATURES)
-      if (!features.ok || !features.data) return
+      if (!current() || !features.ok || !features.data) return
       const signature = JSON.stringify(features.data)
       if (signature === previous) return
       const result = await api.backend.call<{ styles: string; scripts: string[] }>('filter.cosmetics', { partition, ...(features.data as object), initial })
-      if (!active) return
+      if (!current()) return
       previous = signature
       initial = false
       if (result.styles && !styles.has(result.styles)) {
@@ -33,12 +45,21 @@ export function watchBrowserCosmetics(api: ValleyPluginApi, guestId: string, par
         const css = [...styles].join('\n')
         if (css.length <= 1024 * 1024) await api.drivers.browser.styles(guestId, 'page-filter', css)
       }
-      for (const script of result.scripts) if (active) await api.drivers.browser.execute(guestId, script, true)
+      for (const script of result.scripts) if (current()) await api.drivers.browser.execute(guestId, script, true)
     } catch (error) { console.error(error) }
     finally { pending = false }
   }
-  const off = api.backend.on('filter.changed', () => { previous = ''; initial = true; styles.clear(); void api.drivers.browser.styles(guestId, 'page-filter', '').then(() => update()) })
-  void update()
-  const timer = setInterval(() => void update(), 2000)
-  return () => { active = false; off(); clearInterval(timer) }
+  const off = api.backend.on('filter.changed', () => {
+    if (!active || !owner.active()) return
+    generation++
+    previous = ''; initial = true; styles.clear()
+    track(api.drivers.browser.styles(guestId, 'page-filter', '').then(() => update()).catch(error => console.error(error)))
+  })
+  track(update())
+  const timer = setInterval(() => track(update()), 2000)
+  return () => {
+    if (disposal) return disposal
+    active = false; off(); clearInterval(timer)
+    return disposal = (async () => { while (work.size) await Promise.allSettled([...work]) })()
+  }
 }

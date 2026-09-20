@@ -2,7 +2,6 @@ import { partitionFor } from './profiles'
 import { React, api } from './runtime'
 import type { FC, ReactNode } from 'react'
 import type { MainWorkspaceViewProps } from '@valley/plugin-sdk'
-import { getStore } from './store'
 import { useWeb } from './hooks'
 import { clearWebContext, publishWebContext } from './webContext'
 import { uiText } from './localization'
@@ -45,10 +44,12 @@ const StarIcon: FC<{ filled?: boolean }> = ({ filled }) => (
 export const Page: FC<MainWorkspaceViewProps> = ({ instanceId, navigation }) => {
   const id = instanceId ?? '__single'
   const { store, snap } = useWeb()
+  const BrowserGuest = store?.api.ui.BrowserGuest ?? api.ui.BrowserGuest
   const tab = snap.tabs[id]
   const url = tab?.url ?? ''
   const title = tab?.title ?? ''
   const profileId = tab?.profileId ?? snap.activeProfileId
+  const target = store?.guestTarget(id)
   const profile = snap.profiles.find((entry) => entry.id === profileId)
   const profileName = profile?.name ?? profileId
   const [draft, setDraft] = React.useState(url)
@@ -62,11 +63,11 @@ export const Page: FC<MainWorkspaceViewProps> = ({ instanceId, navigation }) => 
     navigation.setController({
       canGoBack: store.canGoBack(id),
       canGoForward: store.canGoForward(id),
-      goBack: () => store.goBack(id),
-      goForward: () => store.goForward(id)
+      goBack: () => { if (store.guestTarget(id) === target) store.goBack(id) },
+      goForward: () => { if (store.guestTarget(id) === target) store.goForward(id) }
     })
     return () => navigation.setController(null)
-  }, [id, navigation, snap, store])
+  }, [id, navigation, snap, store, target])
 
   // Favorite state for the star. The viewed tab is normally in the active
   // profile, so the snapshot (which mirrors the active profile's favorites)
@@ -92,15 +93,17 @@ export const Page: FC<MainWorkspaceViewProps> = ({ instanceId, navigation }) => 
     })
   }
 
-  const [readyPartition, setReadyPartition] = React.useState('')
+  const [readyGuest, setReadyGuest] = React.useState<ReturnType<NonNullable<typeof store>['bindGuest']> | null>(null)
   const [loadError, setLoadError] = React.useState('')
   React.useEffect(() => {
     let active = true
+    if (!store || !target) return
+    const binding = store.bindGuest(id, target)
     setLoadError('')
-    void api.backend.call('filter.prepare', { partition: partitionFor(profileId) }).then(() => { if (active) setReadyPartition(profileId) }).catch((error) => { if (active) setLoadError(String(error)) })
-    return () => { active = false }
-  }, [profileId])
-  React.useEffect(() => getStore()?.mountTab(id), [id])
+    void binding.prepare().then(() => { if (active) setReadyGuest(binding) }).catch((error) => { if (active) setLoadError(String(error)) })
+    return () => { active = false; binding.dispose() }
+  }, [id, profileId, store, target])
+  React.useEffect(() => store?.mountTab(id), [id, store])
 
   // Publish this tab as the active website while it's mounted (only the active tab
   // per pane mounts) so the SideNotes panel can attach notes to the page. Clear on
@@ -111,7 +114,7 @@ export const Page: FC<MainWorkspaceViewProps> = ({ instanceId, navigation }) => 
   }, [id, url, title])
 
   const go = (): void => {
-    if (draft.trim()) getStore()?.navigate(id, draft)
+    if (draft.trim() && store?.guestTarget(id) === target) store?.navigate(id, draft)
   }
 
   return (
@@ -138,7 +141,7 @@ export const Page: FC<MainWorkspaceViewProps> = ({ instanceId, navigation }) => 
           }}
         />
         <div className="web-nav-group">
-          <button className="web-nav-btn" title={uiText('auto.cce7155371fc')} aria-label={uiText('auto.cce7155371fc')} onClick={() => getStore()?.reload(id)}>
+          <button className="web-nav-btn" title={uiText('auto.cce7155371fc')} aria-label={uiText('auto.cce7155371fc')} onClick={() => { if (store?.guestTarget(id) === target) store?.reload(id) }}>
             <NavIcon>
               <polyline points="23 4 23 10 17 10" />
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
@@ -155,7 +158,7 @@ export const Page: FC<MainWorkspaceViewProps> = ({ instanceId, navigation }) => 
           <StarIcon filled={isFav} />
         </button>
       </div>
-      <div className="web-host">{loadError ? <div role="alert">{loadError}</div> : readyPartition === profileId ? <api.ui.BrowserGuest key={`${id}:${profileId}`} instanceId={id} src={url || snap.settings.homepage || 'https://www.google.com'} partition={partitionFor(profileId)} requestFilter="filter.request" onReady={(event) => store?.readyGuest(id, event)} /> : <div role="status">{uiText('surfing.embed.loading')}</div>}</div>
+      <div className="web-host">{loadError ? <div role="alert">{loadError}</div> : target && readyGuest?.target === target ? <BrowserGuest key={`${id}:${profileId}`} instanceId={id} src={url || snap.settings.homepage || 'https://www.google.com'} partition={partitionFor(profileId)} requestFilter="filter.request" onReady={readyGuest.onReady} /> : <div role="status">{uiText('surfing.embed.loading')}</div>}</div>
     </div>
   )
 }

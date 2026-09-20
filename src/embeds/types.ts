@@ -1,6 +1,6 @@
 export type EmbedProviderKind = 'youtube' | 'x' | 'generic'
 export type EmbedValueParser = 'youtube-video-id' | 'x-post-id' | 'identity'
-export type EmbedThemeName = 'light' | 'reading' | 'dark'
+export type EmbedThemeName = 'light' | 'dark'
 
 export interface EmbedProviderPresentation {
   initialHeight: number

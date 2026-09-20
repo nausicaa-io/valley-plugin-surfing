@@ -1,6 +1,7 @@
 import { uiText } from './localization'
 import { api } from './runtime'
 import { pluginDataDirectoryPath } from '@valley/plugin-sdk/paths'
+import type { PluginCodeBlockClaim } from '@valley/plugin-sdk'
 import {
   BUILT_IN_PROVIDERS,
   embedRendererForProvider,
@@ -27,7 +28,11 @@ export const EMBEDS_REL_DIR = 'embeds'
 const PROVIDER_FILENAME = 'provider.json'
 const RENDERER_FILENAME = 'renderer.tsx'
 export const EMBEDS_DIR = `${pluginDataDirectoryPath('surfing')}/${EMBEDS_REL_DIR}`
-const RESERVED_FENCE_LANGUAGES = new Set(['surfing', 'map', 'music', 'todo', 'calendar', 'contacts', 'sidenotes', 'graph', 'email', 'mermaid'])
+export const WEB_FENCE_LANGUAGE = 'surfing'
+
+export function reservedEmbedLanguages(claims: readonly PluginCodeBlockClaim[]): Set<string> {
+  return new Set([WEB_FENCE_LANGUAGE, ...claims.filter(claim => claim.owner.kind === 'system' || claim.owner.pluginId !== api.pluginId).map(claim => claim.language.toLowerCase())])
+}
 
 export interface EmbedProviderIssue {
   path: string
@@ -156,7 +161,7 @@ function validateTheme(value: unknown, path: string, issues: EmbedProviderIssue[
     return null
   }
   const themes = values as Record<string, unknown>
-  if (!['light', 'reading', 'dark'].every((theme) => typeof themes[theme] === 'string' && Boolean(String(themes[theme]).trim()))) {
+  if (!['light', 'dark'].every((theme) => typeof themes[theme] === 'string' && Boolean(String(themes[theme]).trim()))) {
     issues.push({ path, message: uiText('surfing.embedValidation.themeValues') })
     return null
   }
@@ -164,7 +169,6 @@ function validateTheme(value: unknown, path: string, issues: EmbedProviderIssue[
     queryParameter,
     values: {
       light: String(themes.light).trim(),
-      reading: String(themes.reading).trim(),
       dark: String(themes.dark).trim()
     }
   }
@@ -188,7 +192,7 @@ function validateProvider(value: unknown, directory: string, issues: EmbedProvid
     issues.push({ path, message: uiText('surfing.embedValidation.identity') })
     return null
   }
-  if (RESERVED_FENCE_LANGUAGES.has(language.toLowerCase())) {
+  if (language.toLowerCase() === WEB_FENCE_LANGUAGE) {
     issues.push({ path, message: uiText('surfing.embedValidation.reserved', { value: language }) })
     return null
   }
@@ -291,11 +295,11 @@ async function loadRenderer(provider: EmbedProvider, issues: EmbedProviderIssue[
 
 let rendererLoadSequence = 0
 
-export async function loadEmbedProviders(): Promise<EmbedProviderConfiguration> {
+export async function loadEmbedProviders(claims?: readonly PluginCodeBlockClaim[]): Promise<EmbedProviderConfiguration> {
   const loadSequence = ++rendererLoadSequence
   const issues: EmbedProviderIssue[] = []
-  const entries = await api.data.files.list(EMBEDS_REL_DIR)
-  const providers: EmbedProvider[] = [...BUILT_INS]
+  const [entries, activeClaims] = await Promise.all([api.data.files.list(EMBEDS_REL_DIR), claims ?? api.markdown.listCodeBlockClaims()])
+  let providers: EmbedProvider[] = [...BUILT_INS]
   const customized: string[] = []
   for (const entry of entries) {
     if (!entry.isDirectory || !safeDirectory(entry.name)) continue
@@ -318,6 +322,12 @@ export async function loadEmbedProviders(): Promise<EmbedProviderConfiguration> 
     else providers.push(provider)
     customized.push(provider.id)
   }
+  const reserved = reservedEmbedLanguages(activeClaims)
+  providers = providers.filter(provider => {
+    if (!reserved.has(provider.language.toLowerCase())) return true
+    issues.push({ path: providerPath(provider.directory), message: uiText('surfing.embedValidation.reserved', { value: provider.language }) })
+    return false
+  })
   providers.sort((left, right) => left.order - right.order || left.displayName.localeCompare(right.displayName))
   const runtimeRenderers = new Map<string, EmbedRenderer>()
   const stamps: string[] = []
@@ -364,11 +374,14 @@ export async function customizeEmbedProvider(provider: EmbedProvider): Promise<v
 }
 
 export async function createCustomEmbedProvider(): Promise<EmbedProvider> {
-  const configuration = await loadEmbedProviders()
-  const ids = new Set(configuration.providers.map((provider) => provider.id.toLowerCase()))
+  const claims = await api.markdown.listCodeBlockClaims()
+  const configuration = await loadEmbedProviders(claims)
+  const entries = await api.data.files.list(EMBEDS_REL_DIR)
+  const ids = new Set([...configuration.providers.map(provider => provider.id.toLowerCase()), ...entries.filter(entry => entry.isDirectory).map(entry => entry.name.toLowerCase())])
+  const languages = new Set([...reservedEmbedLanguages(claims), ...configuration.providers.map(provider => provider.language.toLowerCase())])
   let suffix = 1
   let id = 'custom'
-  while (ids.has(id)) id = `custom-${++suffix}`
+  while (ids.has(id) || languages.has(id)) id = `custom-${++suffix}`
   const provider: EmbedProvider = {
     schemaVersion: 1,
     id,

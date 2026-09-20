@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FiltersEngine } from '@ghostery/adblocker'
-import type { PluginBackendApi } from '@valley/plugin-sdk'
+import type { DatasetPage, PluginBackendApi } from '@valley/plugin-sdk'
 import { createFilters } from '../src/backend'
+import { partitionFor } from '../src/profiles'
 import { createMockValleyApi } from './mock'
 
 const rules = '||ads.example.test^\n@@||ads.example.test/allowed.js\nexample.test##.advert\n||example.test^$csp=script-src \'none\''
@@ -55,5 +56,65 @@ describe('package-owned browser filter engine', () => {
     await expect(filters.configure({ ...config, extra: true })).rejects.toThrow()
     await expect(filters.request({ ...request, url: 'not a URL' })).rejects.toThrow()
     expect(network.fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([999, 1000, 1001])('loads every stored profile across the %i boundary and shares startup reads', async (count) => {
+    mock.datasets.set('renamed-browser.profile_adblock', Array.from({ length: count }, (_, index) => ({
+      profileId: `profile-${index}`, adblockEnabled: false
+    })))
+    const dataset = mock.api.data.dataset
+    const query = vi.fn((options) => dataset('profile_adblock').query(options))
+    vi.spyOn(mock.api.data, 'dataset').mockImplementation(((name: string) => ({ ...dataset(name), query })) as typeof dataset)
+    const filters = createFilters(api)
+    const selected = { ...request, partition: partitionFor(`profile-${count - 1}`) }
+    expect(await Promise.all([filters.request(selected), filters.request(selected)])).toEqual([{}, {}])
+    expect(query).toHaveBeenCalledTimes(Math.ceil(count / 1000))
+    expect(network.fetch).not.toHaveBeenCalled()
+  })
+
+  it('keeps newer explicit configuration when an earlier profile read completes', async () => {
+    let complete!: (page: DatasetPage) => void
+    const blocked = new Promise<DatasetPage>((resolve) => { complete = resolve })
+    const dataset = mock.api.data.dataset
+    vi.spyOn(mock.api.data, 'dataset').mockImplementation(((name: string) => ({ ...dataset(name), query: () => blocked })) as typeof dataset)
+    const filters = createFilters(api)
+    const pending = filters.request({ ...request, partition: partitionFor('profile') })
+    await filters.configure({ profiles: [{ ...config.profiles[0], partition: partitionFor('profile'), enabled: false }] })
+    complete({ rows: [{ profileId: 'profile', adblockEnabled: true }], revision: 1 })
+    expect(await pending).toEqual({})
+    expect(network.fetch).not.toHaveBeenCalled()
+  })
+
+  it('retires superseded engine configurations and bounds retained engines across profiles', async () => {
+    const filters = createFilters(api)
+    const profiles = Array.from({ length: 10 }, (_, index) => ({
+      ...config.profiles[0], partition: `profile-${index}`, rules: `https://filters.example.test/${index}.txt`
+    }))
+    await filters.configure({ profiles })
+    for (const profile of profiles) await filters.request({ ...request, partition: profile.partition })
+    expect(FiltersEngine.fromLists).toHaveBeenCalledTimes(10)
+    await filters.request({ ...request, partition: profiles[9].partition })
+    expect(FiltersEngine.fromLists).toHaveBeenCalledTimes(10)
+    await filters.request({ ...request, partition: profiles[0].partition })
+    expect(FiltersEngine.fromLists).toHaveBeenCalledTimes(11)
+    await filters.configure({ profiles: [] })
+    await filters.configure({ profiles: [profiles[0]] })
+    await filters.request({ ...request, partition: profiles[0].partition })
+    expect(FiltersEngine.fromLists).toHaveBeenCalledTimes(12)
+  })
+
+  it.each(['disable', 'dispose'])('discards a pending engine after %s', async (action) => {
+    let complete!: (engine: FiltersEngine) => void
+    vi.mocked(FiltersEngine.fromLists).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve }))
+    const filters = createFilters(api)
+    const dispose = filters.register()
+    await filters.configure(config)
+    const pending = filters.request(request)
+    await vi.waitFor(() => expect(FiltersEngine.fromLists).toHaveBeenCalledTimes(1))
+    if (action === 'disable') await filters.configure({ profiles: [{ ...config.profiles[0], enabled: false }] })
+    else dispose()
+    complete(FiltersEngine.parse(rules))
+    expect(await pending).toEqual({})
+    if (action === 'disable') dispose()
   })
 })

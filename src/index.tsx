@@ -25,14 +25,15 @@ import { initLocalization, uiText } from './localization'
 import { surfingAgentTools, registerBrowserAgentCommands } from './agentTools'
 import { registerSurfingSurfaces } from './surfaces'
 
-export function register(api: ValleyPluginApi): () => void {
+export function register(api: ValleyPluginApi): () => Promise<void> {
   initLocalization(api)
   initRuntime(api)
   const disposeStyles = injectStyles()
   const store = createStore(api)
+  let active = true
   store.startOverlay()
   const ready = store.loadConfig()
-  const providersReady = ready.then(() => ensureEmbedProviders())
+  const providersReady = ready.then(() => active ? ensureEmbedProviders() : { providers: [], customized: [], issues: [] })
   const offSurfaces = registerSurfingSurfaces(api, store, ready)
   const offCommands = registerWebCommands(api, store)
   const offNavigator = api.interop.services.provide(WEB_NAVIGATOR_V1, {
@@ -49,7 +50,7 @@ export function register(api: ValleyPluginApi): () => void {
   const offBrowserAutomation = api.interop.services.provide(BROWSER_AUTOMATION_V1, browserAutomation)
   const offAgentCommands = registerBrowserAgentCommands(api, browserAutomation)
   const offAgentTools = api.interop.services.provide(AGENT_TOOL_PROVIDER_V1, surfingAgentTools(browserAutomation, api))
-  let active = true
+  let disposal: Promise<void> | undefined
   let offNewTab: (() => void) | null = null
   const syncNewTabHandler = (): void => {
     if (!active) return
@@ -77,6 +78,7 @@ export function register(api: ValleyPluginApi): () => void {
   api.registerView('surfing.settings', Settings)
 
   return () => {
+    if (disposal) return disposal
     active = false
     offNewTabSetting()
     offNewTab?.()
@@ -85,10 +87,14 @@ export function register(api: ValleyPluginApi): () => void {
     offAgentTools()
     offAgentCommands()
     offSurfaces()
-    offCommands()
+    const commandsDrained = offCommands()
     offFences()
-    disposeStore(api, store)
+    const drained = disposeStore(api, store)
     disposeStyles()
+    return disposal = Promise.allSettled([drained, commandsDrained]).then(results => {
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed?.status === 'rejected') throw failed.reason
+    })
   }
 }
 

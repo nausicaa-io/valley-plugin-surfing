@@ -1,7 +1,8 @@
-import { uiText } from './localization'
+import { createUiText } from './localization'
 import type { ValleyPluginApi, BrowserSnapshotResult, BrowserTextResult, BrowserHtmlResult, BrowserActionResult } from '@valley/plugin-sdk'
 
 export function browserAutomation(api: ValleyPluginApi) {
+  const uiText = createUiText(api)
   const runJs = async (guestId: string, script: string, userGesture = false): Promise<unknown> => {
     const result = await api.drivers.browser.execute(guestId, script, userGesture)
     if (!result.ok) throw new Error(result.error || uiText('surfing.error.action'))

@@ -1,13 +1,14 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createMockValleyApi } from './mock'
 import { register } from '../src/index'
+import { registerWebCommands } from '../src/commands'
 import { initRuntime } from '../src/runtime'
 import { createStore, disposeStore, getStore, toUrl } from '../src/store'
 import { clearWebContext, publishWebContext, requestWebNoteFromSelection } from '../src/webContext'
 import { embedPresentation, registerWebFences, resolveProviderUrl } from '../src/embeds'
-import { ensureEmbedProviders, loadEmbedProviders, customizeEmbedProvider, type EmbedProvider } from '../src/embedProviders'
+import { ensureEmbedProviders, loadEmbedProviders, customizeEmbedProvider, createCustomEmbedProvider, type EmbedProvider } from '../src/embedProviders'
 import { BUILT_IN_PROVIDERS, embedRenderer, installRuntimeEmbedRenderers } from '../src/embeds/registry'
 import {
   TEXT_SELECTION_ACTION_V1,
@@ -51,7 +52,7 @@ const xProvider: EmbedProvider = {
   kind: 'x',
   valueParser: 'x-post-id',
   presentation: { initialHeight: 180, autoSize: true, fullWidth: true, minHeight: 180, maxHeight: 1200, fitWidth: { naturalWidth: 515, maxScale: 1.3 } },
-  theme: { queryParameter: 'theme', values: { light: 'light', reading: 'light', dark: 'dark' } },
+  theme: { queryParameter: 'theme', values: { light: 'light', dark: 'dark' } },
   order: 20,
   directory: 'x'
 }
@@ -412,6 +413,8 @@ describe('web plugin', () => {
     const configuration = await ensureEmbedProviders()
 
     expect(configuration.providers.map((provider) => provider.id)).toEqual(['youtube', 'x'])
+    expect(configuration.providers.find((provider) => provider.id === 'x')?.theme?.values).toEqual({ light: 'light', dark: 'dark' })
+    expect(configuration.issues).toEqual([])
     expect(configuration.customized).toEqual([])
     for (const id of ['youtube', 'x']) {
       expect(await mock.api.data.files.readText(`embeds/${id}/provider.json`)).toBeNull()
@@ -443,7 +446,7 @@ describe('web plugin', () => {
     expect(configuration.customized).toEqual(['youtube'])
     expect(await mock.api.data.files.readText('embeds/x/provider.json')).toBeNull()
 
-    expect(resolveProviderUrl(xProvider, 'https://x.com/jack/status/20', 'reading')).toBe('https://platform.twitter.com/embed/Tweet.html?id=20&theme=light')
+    expect(resolveProviderUrl(xProvider, 'https://x.com/jack/status/20', 'light')).toBe('https://platform.twitter.com/embed/Tweet.html?id=20&theme=light')
     expect(resolveProviderUrl(xProvider, 'https://x.com/jack/status/20', 'dark')).toBe('https://platform.twitter.com/embed/Tweet.html?id=20&theme=dark')
     expect(resolveProviderUrl({ ...xProvider, kind: 'generic' }, 'https://x.com/jack/status/20', 'dark')).toBe('https://platform.twitter.com/embed/Tweet.html?id=20&theme=dark')
     expect(embedPresentation('https://www.youtube.com/embed/UF8uR6Z6KLc')).toEqual({
@@ -480,6 +483,85 @@ describe('web plugin', () => {
     expect(configuration.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: '.valley/plugins/data/surfing/embeds/unsafe/provider.json' })
     ]))
+  })
+
+  it('validates arbitrary active owners and permits languages whose old plugin is not registered', async () => {
+    const custom = { ...youtubeProvider, id: 'field', directory: 'field', kind: 'generic' as const, valueParser: 'identity' as const, language: 'wildlife' }
+    const mock = createMockValleyApi({
+      codeBlockClaims: [{ language: 'wildlife', owner: { kind: 'plugin', pluginId: 'field-guide' } }, { language: 'mermaid', owner: { kind: 'system' } }],
+      files: {
+        '.valley/plugins/data/surfing/embeds/field/provider.json': providerFile(custom),
+        '.valley/plugins/data/surfing/embeds/old/provider.json': providerFile({ ...custom, id: 'old', directory: 'old', language: 'map' }),
+        '.valley/plugins/data/surfing/embeds/diagram/provider.json': providerFile({ ...custom, id: 'diagram', directory: 'diagram', language: 'mermaid' })
+      }
+    })
+    initRuntime(mock.api)
+    const configuration = await loadEmbedProviders()
+    expect(configuration.providers.map(provider => provider.language)).toEqual(expect.arrayContaining(['map', 'youtube', 'X']))
+    expect(configuration.providers).toHaveLength(3)
+    expect(configuration.issues.map(issue => issue.path)).toEqual(expect.arrayContaining([
+      '.valley/plugins/data/surfing/embeds/field/provider.json', '.valley/plugins/data/surfing/embeds/diagram/provider.json'
+    ]))
+    mock.emitCodeBlockClaims([])
+    expect((await loadEmbedProviders()).providers.map(provider => provider.id)).toContain('field')
+  })
+
+  it('reconciles owner unloads and provider renames without refreshing for its own registrations', async () => {
+    const custom = { ...youtubeProvider, id: 'field', directory: 'field', kind: 'generic' as const, valueParser: 'identity' as const, language: 'wildlife' }
+    const mock = createMockValleyApi({
+      codeBlockClaims: [{ language: 'wildlife', owner: { kind: 'plugin', pluginId: 'field-guide' } }],
+      files: { '.valley/plugins/data/surfing/embeds/field/provider.json': providerFile(custom) }
+    })
+    initRuntime(mock.api)
+    const list = vi.spyOn(mock.api.data.files, 'list')
+    let filesChanged: (path: string) => void = () => {}
+    vi.spyOn(mock.api.data.files, 'onChanged').mockImplementation(listener => { filesChanged = listener; return () => { filesChanged = () => {} } })
+    const dispose = registerWebFences()
+    await waitFor(() => expect(mock.codeBlockRenderers.has('youtube')).toBe(true))
+    expect(mock.codeBlockRenderers.has('wildlife')).toBe(false)
+    expect(list).toHaveBeenCalledOnce()
+    mock.emitCodeBlockClaims([])
+    await waitFor(() => expect(mock.codeBlockRenderers.has('wildlife')).toBe(true))
+    expect(list).toHaveBeenCalledTimes(2)
+    const baseline = await mock.api.data.files.readTextBaseline('embeds/field/provider.json')
+    await mock.api.data.files.writeTextGuarded('embeds/field/provider.json', providerFile({ ...custom, language: 'renamed-field' }), baseline!.baseline)
+    filesChanged('embeds/field/provider.json')
+    await waitFor(() => expect(mock.codeBlockRenderers.has('renamed-field')).toBe(true))
+    expect(mock.codeBlockRenderers.has('wildlife')).toBe(false)
+    expect(mock.codeBlockRenderers.has('surfing')).toBe(true)
+    expect(list).toHaveBeenCalledTimes(3)
+    dispose()
+    mock.emitCodeBlockClaims([{ language: 'remote', owner: { kind: 'plugin', pluginId: 'another-owner' } }])
+    await tick()
+    expect(list).toHaveBeenCalledTimes(3)
+    expect(mock.codeBlockRenderers.size).toBe(0)
+  })
+
+  it('coalesces claim changes during hydration and ignores pending results after disposal', async () => {
+    const mock = createMockValleyApi()
+    initRuntime(mock.api)
+    let resolve!: (entries: Awaited<ReturnType<typeof mock.api.data.files.list>>) => void
+    const list = vi.spyOn(mock.api.data.files, 'list').mockImplementationOnce(() => new Promise(done => { resolve = done }))
+    const dispose = registerWebFences()
+    for (let index = 0; index < 20; index++) mock.emitCodeBlockClaims([{ language: `remote-${index}`, owner: { kind: 'plugin', pluginId: 'another-owner' } }])
+    resolve([])
+    await waitFor(() => expect(mock.codeBlockRenderers.has('youtube')).toBe(true))
+    expect(list).toHaveBeenCalledTimes(2)
+    let release!: (entries: Awaited<ReturnType<typeof mock.api.data.files.list>>) => void
+    list.mockImplementationOnce(() => new Promise(done => { release = done }))
+    mock.emitCodeBlockClaims([])
+    dispose()
+    release([])
+    await tick()
+    expect(mock.codeBlockRenderers.size).toBe(0)
+    expect(list).toHaveBeenCalledTimes(3)
+  })
+
+  it('chooses a custom language without taking another active owner claim', async () => {
+    const mock = createMockValleyApi({ codeBlockClaims: [{ language: 'custom', owner: { kind: 'plugin', pluginId: 'another-owner' } }] })
+    initRuntime(mock.api)
+    expect(await createCustomEmbedProvider()).toMatchObject({ id: 'custom-2', language: 'custom-2' })
+    expect(await mock.api.data.files.readText('embeds/custom/provider.json')).toBeNull()
   })
 
   it('forwards web-navigator new-tab intent to workspace placement', async () => {
@@ -1094,5 +1176,245 @@ describe('web store (ad-block sync)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('clipping document revisions', () => {
+  const path = 'Clippings/Forest field notes.md'
+  const prior = '---\ntitle: Preserved\n---\nUnsaved ä ö ü observation\n'
+  const disposers: Array<() => Promise<void>> = []
+  const fixture = (existing = true) => {
+    const mock = createMockValleyApi({
+      vault: { path: '/mock/forest', name: 'forest', displayName: 'forest' },
+      files: existing ? { [path]: prior } : {}
+    })
+    initRuntime(mock.api)
+    const store = createStore(mock.api)
+    vi.spyOn(store, 'browserReadHtml').mockResolvedValue({ ok: true, data: {
+      url: 'https://example.test/forest', title: 'Forest field notes',
+      html: `<html><head><title>Forest field notes</title></head><body><article><h1>Forest field notes</h1><p>${'The forest study records moss, ferns and diverse woodland habitats. '.repeat(8)}</p></article></body></html>`
+    } })
+    const unregister = registerWebCommands(mock.api, store)
+    disposers.push(async () => { await unregister(); await disposeStore(mock.api, store) })
+    const clip = (collision = 'overwrite') => mock.api.commands.execute('surfing:clip', { instanceId: 'source', collision })
+    return { ...mock, store, unregister, clip }
+  }
+  afterEach(async () => { for (const dispose of disposers.splice(0)) await dispose() })
+
+  it('uses editor snapshots and alternates exact undo/redo receipts without disk-only reads', async () => {
+    const mock = fixture()
+    const disk = vi.spyOn(mock.api.vault, 'readFile').mockRejectedValue(new Error('Disk-only read'))
+    const read = vi.spyOn(mock.api.vault, 'readTextDocument')
+    expect(await mock.clip()).toMatchObject({ ok: true, value: { relPath: path } })
+    const content = vi.mocked(mock.api.vault.writeTextDocumentGuarded).mock.calls[0][1]
+    expect(content).toContain('woodland habitats')
+    expect(disk).not.toHaveBeenCalled()
+    expect(read).toHaveBeenCalledOnce()
+    await mock.busUndo[0].undo()
+    expect(vi.mocked(mock.api.vault.writeTextDocumentGuarded).mock.calls.at(-1)?.[1]).toBe(prior)
+    await mock.busUndo[0].redo!()
+    expect(vi.mocked(mock.api.vault.writeTextDocumentGuarded).mock.calls.at(-1)?.[1]).toBe(content)
+    await mock.busUndo[0].undo()
+    expect(read).toHaveBeenCalledOnce()
+    expect(mock.api.vault.writeFile).not.toHaveBeenCalled()
+  })
+
+  it.each(['error', 'missing'] as const)('does not overwrite when the editor snapshot is %s', async outcome => {
+    const mock = fixture()
+    const read = vi.spyOn(mock.api.vault, 'readTextDocument')
+    if (outcome === 'error') read.mockRejectedValue(new Error('Read failed'))
+    else read.mockResolvedValue(null)
+    expect((await mock.clip()).ok).toBe(false)
+    expect(mock.api.vault.writeTextDocumentGuarded).not.toHaveBeenCalled()
+    expect(mock.api.vault.writeFileGuarded).not.toHaveBeenCalled()
+    expect(await mock.api.vault.readFile(path)).toBe(prior)
+  })
+
+  it('rejects a change after capture without overwriting it', async () => {
+    const mock = fixture()
+    const write = vi.mocked(mock.api.vault.writeTextDocumentGuarded).getMockImplementation()!
+    vi.mocked(mock.api.vault.writeTextDocumentGuarded).mockImplementationOnce(async (...args) => {
+      await mock.api.vault.writeFile(path, 'Newer editor draft')
+      return write(...args)
+    })
+    expect((await mock.clip()).ok).toBe(false)
+    expect(await mock.api.vault.readFile(path)).toBe('Newer editor draft')
+    expect(mock.busUndo).toHaveLength(0)
+  })
+
+  it.each(['undo', 'redo'] as const)('rejects %s after an edit/revert ABA without renewing authority', async direction => {
+    const mock = fixture()
+    await mock.clip()
+    if (direction === 'redo') await mock.busUndo[0].undo()
+    const content = await mock.api.vault.readFile(path)
+    await mock.api.vault.writeFile(path, `${content}new`)
+    await mock.api.vault.writeFile(path, content)
+    const read = vi.spyOn(mock.api.vault, 'readTextDocument')
+    await expect(mock.busUndo[0][direction]!()).rejects.toThrow()
+    expect(read).not.toHaveBeenCalled()
+    expect(await mock.api.vault.readFile(path)).toBe(content)
+  })
+
+  it('preserves a committed write with newer typing and withholds undo authority', async () => {
+    const mock = fixture()
+    const write = vi.mocked(mock.api.vault.writeTextDocumentGuarded).getMockImplementation()!
+    vi.mocked(mock.api.vault.writeTextDocumentGuarded).mockImplementationOnce(async (...args) => {
+      const result = await write(...args)
+      if (!result.ok) return result
+      await mock.api.vault.writeFile(path, `${args[1]}Newer typing`)
+      return { ok: true, revisionToken: null, editorConflict: true }
+    })
+    expect((await mock.clip()).ok).toBe(true)
+    await expect(mock.busUndo[0].undo()).rejects.toThrow()
+    expect(await mock.api.vault.readFile(path)).toContain('Newer typing')
+  })
+
+  it('creates only into an absent path and never overwrites an occupied redo target', async () => {
+    const mock = fixture(false)
+    expect((await mock.clip()).ok).toBe(true)
+    expect(mock.api.vault.createTextDocumentGuarded).toHaveBeenCalledWith(path, expect.any(String))
+    await mock.busUndo[0].undo()
+    await mock.api.vault.writeFile(path, 'Replacement')
+    await expect(mock.busUndo[0].redo!()).rejects.toThrow()
+    expect(await mock.api.vault.readFile(path)).toBe('Replacement')
+  })
+
+  it('alternates creation and guarded trash using returned receipts without rereading', async () => {
+    const mock = fixture(false)
+    const read = vi.spyOn(mock.api.vault, 'readTextDocument')
+    expect((await mock.clip()).ok).toBe(true)
+    const content = await mock.api.vault.readFile(path)
+    await mock.busUndo[0].undo()
+    await mock.busUndo[0].redo!()
+    expect(await mock.api.vault.readFile(path)).toBe(content)
+    await mock.busUndo[0].undo()
+    expect(mock.api.vault.createTextDocumentGuarded).toHaveBeenCalledTimes(2)
+    expect(mock.api.vault.trashTextDocumentGuarded).toHaveBeenCalledTimes(2)
+    expect(read).not.toHaveBeenCalled()
+    expect(mock.driverCalls.some(call => call.method === 'deleteMarkdown')).toBe(false)
+  })
+
+  it('preserves edits made before a create acknowledgement without renewing undo authority', async () => {
+    const mock = fixture(false)
+    const create = vi.mocked(mock.api.vault.createTextDocumentGuarded).getMockImplementation()!
+    vi.mocked(mock.api.vault.createTextDocumentGuarded).mockImplementationOnce(async (...args) => {
+      const result = await create(...args)
+      await mock.api.vault.writeFile(path, `${args[1]}Newer typing`)
+      return result
+    })
+    expect((await mock.clip()).ok).toBe(true)
+    await expect(mock.busUndo[0].undo()).rejects.toThrow()
+    expect(await mock.api.vault.readFile(path)).toContain('Newer typing')
+  })
+
+  it('does not fall back to deletion or retry when the host rejects a dirty editor', async () => {
+    const mock = fixture(false)
+    await mock.clip()
+    const content = await mock.api.vault.readFile(path)
+    vi.mocked(mock.api.vault.trashTextDocumentGuarded).mockResolvedValueOnce({ ok: false, reason: 'stale' })
+    await expect(mock.busUndo[0].undo()).rejects.toThrow()
+    await expect(mock.busUndo[0].undo()).rejects.toThrow()
+    expect(mock.api.vault.trashTextDocumentGuarded).toHaveBeenCalledOnce()
+    expect(await mock.api.vault.readFile(path)).toBe(content)
+    expect(mock.driverCalls.some(call => call.method === 'deleteMarkdown')).toBe(false)
+  })
+
+  it.each([true, false])('does not replay committed trash with recoverySaved=%s', async recoverySaved => {
+    const mock = fixture(false)
+    await mock.clip()
+    const trash = vi.mocked(mock.api.vault.trashTextDocumentGuarded).getMockImplementation()!
+    vi.mocked(mock.api.vault.trashTextDocumentGuarded).mockImplementationOnce(async (...args) => {
+      const result = await trash(...args)
+      return result.ok ? { ...result, editorConflict: true, recoverySaved } : result
+    })
+    await expect(mock.busUndo[0].undo()).rejects.toThrow('file was deleted')
+    await expect(mock.busUndo[0].undo()).rejects.toThrow()
+    await expect(mock.busUndo[0].redo!()).rejects.toThrow()
+    expect(mock.api.vault.trashTextDocumentGuarded).toHaveBeenCalledOnce()
+    expect(mock.api.vault.createTextDocumentGuarded).toHaveBeenCalledOnce()
+  })
+
+  it('does not retry an uncertain physical trash result', async () => {
+    const mock = fixture(false)
+    await mock.clip()
+    const trash = vi.mocked(mock.api.vault.trashTextDocumentGuarded).getMockImplementation()!
+    vi.mocked(mock.api.vault.trashTextDocumentGuarded).mockImplementationOnce(async (...args) => { await trash(...args); throw new Error('Acknowledgement lost') })
+    await expect(mock.busUndo[0].undo()).rejects.toThrow('Acknowledgement lost')
+    await expect(mock.busUndo[0].undo()).rejects.toThrow()
+    expect(mock.api.vault.trashTextDocumentGuarded).toHaveBeenCalledOnce()
+  })
+
+  it('joins a held document read on disposal and stops its subsequent write', async () => {
+    const mock = fixture()
+    const read = mock.api.vault.readTextDocument
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    vi.spyOn(mock.api.vault, 'readTextDocument').mockImplementationOnce(async target => { const value = await read(target); await held; return value })
+    const clipping = mock.clip()
+    await vi.waitFor(() => expect(mock.api.vault.readTextDocument).toHaveBeenCalled())
+    const ended = vi.fn()
+    const closing = mock.unregister().then(ended)
+    try {
+      await Promise.resolve()
+      expect(ended).not.toHaveBeenCalled()
+      release()
+      await expect(clipping).resolves.toMatchObject({ ok: false })
+      await closing
+      expect(mock.api.vault.writeTextDocumentGuarded).not.toHaveBeenCalled()
+    } finally { release() }
+  })
+
+  it('revokes held work after the vault returns A to B to A', async () => {
+    const mock = fixture()
+    const read = mock.api.vault.readTextDocument
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    vi.spyOn(mock.api.vault, 'readTextDocument').mockImplementationOnce(async target => { const value = await read(target); await held; return value })
+    const clipping = mock.clip()
+    await vi.waitFor(() => expect(mock.api.vault.readTextDocument).toHaveBeenCalled())
+    const origin = mock.api.getState().vault
+    mock.emitState({ vault: { path: '/mock/other', name: 'other', displayName: 'other' } })
+    mock.emitState({ vault: origin })
+    release()
+    await expect(clipping).resolves.toMatchObject({ ok: false })
+    expect(mock.api.vault.writeTextDocumentGuarded).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch the same undo twice while its write is pending', async () => {
+    const mock = fixture()
+    await mock.clip()
+    const write = vi.mocked(mock.api.vault.writeTextDocumentGuarded).getMockImplementation()!
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    vi.mocked(mock.api.vault.writeTextDocumentGuarded).mockImplementationOnce(async (...args) => { await held; return write(...args) })
+    const undoing = mock.busUndo[0].undo()
+    await vi.waitFor(() => expect(mock.api.vault.writeTextDocumentGuarded).toHaveBeenCalledTimes(2))
+    try {
+      await expect(mock.busUndo[0].undo()).rejects.toThrow()
+      release()
+      await undoing
+      expect(mock.api.vault.writeTextDocumentGuarded).toHaveBeenCalledTimes(2)
+    } finally { release() }
+  })
+
+  it('joins an accepted write through its known result after disposal begins', async () => {
+    const mock = fixture()
+    const write = vi.mocked(mock.api.vault.writeTextDocumentGuarded).getMockImplementation()!
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    vi.mocked(mock.api.vault.writeTextDocumentGuarded).mockImplementationOnce(async (...args) => { await held; return write(...args) })
+    const clipping = mock.clip()
+    await vi.waitFor(() => expect(mock.api.vault.writeTextDocumentGuarded).toHaveBeenCalled())
+    const ended = vi.fn()
+    const closing = mock.unregister().then(ended)
+    try {
+      await Promise.resolve()
+      expect(ended).not.toHaveBeenCalled()
+      release()
+      await expect(clipping).resolves.toMatchObject({ ok: true })
+      await closing
+      await expect(mock.busUndo[0].undo()).rejects.toThrow()
+      expect(mock.api.vault.writeTextDocumentGuarded).toHaveBeenCalledOnce()
+    } finally { release() }
   })
 })

@@ -1,6 +1,7 @@
 import { uiText } from './localization'
 import { watchBrowserCosmetics } from './browserCosmetics'
 import { browserAutomation } from './browserAutomation'
+import { createGuestLifetime, type GuestLifetime } from './guestLifetime'
 import type { PluginBrowserGuestEvent } from '@valley/plugin-sdk'
 import type {
   BrowserActionResult,
@@ -9,8 +10,6 @@ import type {
   BrowserSnapshotResult,
   BrowserTabsResult,
   BrowserTextResult,
-  PlaybackSource,
-  PluginPlaybackHandle,
   ValleyPluginApi
 } from '@valley/plugin-sdk'
 import type { DriverResult } from '@valley/plugin-sdk/types'
@@ -45,6 +44,8 @@ export interface WebTabState {
   metadata?: WebPageMetadata
 }
 
+export interface GuestTarget { readonly instanceId: string; readonly profileId: string }
+
 export interface WebPageMetadata {
   description?: string
   image?: string
@@ -71,6 +72,7 @@ export interface WebSnapshot {
 }
 
 interface WebviewEl {
+  revision?: number
   guestId: string
   url: string
   back: boolean
@@ -154,7 +156,7 @@ export function toUrl(input: string, engine: SearchEngineId = 'google'): string 
 }
 
 export class WebStore {
-  api: ValleyPluginApi
+  readonly api: ValleyPluginApi
   private listeners = new Set<() => void>()
   private snap: WebSnapshot = {
     tabs: {},
@@ -193,16 +195,20 @@ export class WebStore {
   // A guest playing audible media registers a PlaybackSource so the shared
   // footer bar (play/pause + volume) can drive it. Volume is kept per tab so it
   // survives navigation; `active` tracks which guests currently have media.
-  private mediaVolume = new Map<string, number>()
-  private mediaActive = new Set<string>()
-  private mediaPlayback = new Map<string, PluginPlaybackHandle>()
+  private guestLifetimes = new Map<string, GuestLifetime>()
+  private guestTargets = new Map<string, GuestTarget>()
+  private guestWork = new Set<Promise<unknown>>()
+  private guestFailure: unknown
+  private disposed = false
+  private disposal: Promise<void> | undefined
 
   private views = new Map<string, WebviewEl>()
-  private cosmetics = new Map<string, () => void>()
+  private cosmetics = new Map<string, () => Promise<void>>()
   private browserGuests = new Map<string, string>()
   private hosts = new Set<string>()
   private reconcileTimer: number | null = null
   private offBrowser: () => void
+  private offState: () => void
 
   constructor(api: ValleyPluginApi) {
     this.api = api
@@ -210,6 +216,16 @@ export class WebStore {
       const id = [...this.browserGuests].find(([, guestId]) => guestId === event.guestId)?.[0]
       if (id) this.guestEvent(id, event)
     })
+    const root = api.getState().vault?.path ?? null
+    this.offState = api.subscribe(() => {
+      if ((api.getState().vault?.path ?? null) !== root) void this.dispose().catch(error => console.error(error))
+    })
+  }
+
+  private trackGuestWork<T>(operation: Promise<T>): Promise<T> {
+    this.guestWork.add(operation)
+    void operation.then(() => this.guestWork.delete(operation), () => this.guestWork.delete(operation))
+    return operation
   }
 
   private async rows(datasetId: string, where?: DatasetWhere, orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>): Promise<DatasetRecord[]> {
@@ -255,11 +271,13 @@ export class WebStore {
   getSnapshot = (): WebSnapshot => this.snap
 
   private setSnap(next: Partial<WebSnapshot>): void {
+    if (this.disposed) return
     this.snap = { ...this.snap, ...next }
     for (const l of this.listeners) l()
   }
 
   private patch(id: string, p: Partial<WebTabState>): boolean {
+    if (this.disposed) return false
     const cur = this.snap.tabs[id]
     if (!cur) return false
     const next = { ...cur, ...p }
@@ -273,7 +291,7 @@ export class WebStore {
    *  app reload reopens the page each tab was showing. Debounced + gated on
    *  {@link tabsLoaded} (never persist before the saved set is restored). */
   private persistTabs(): void {
-    if (!this.tabsLoaded) return
+    if (this.disposed || !this.tabsLoaded) return
     if (this.persistTimer != null) clearTimeout(this.persistTimer)
     this.persistTimer = window.setTimeout(() => {
       this.persistTimer = null
@@ -286,7 +304,12 @@ export class WebStore {
 
   // ── Config (profiles + settings) ──────────────────────────────────────────
   /** Load persisted settings + profiles (call once on register). */
-  async loadConfig(): Promise<void> {
+  loadConfig(): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    return this.trackGuestWork(this.readConfig())
+  }
+
+  private async readConfig(): Promise<void> {
     const raw = this.api.settings.get()
     const settings = normalizeSettings(raw)
     let profiles: WebProfile[] = []
@@ -296,6 +319,7 @@ export class WebStore {
     } catch {
       /* first run */
     }
+    if (this.disposed) return
     profiles = reconcileProfiles(profiles)
     try {
       const adblockRows = await this.rows(PROFILE_ADBLOCK_DATASET)
@@ -307,6 +331,7 @@ export class WebStore {
     } catch {
       /* first run */
     }
+    if (this.disposed) return
     const normalProfileId = profiles.find((p) => !p.private)?.id ?? DEFAULT_PROFILE_ID
     const wanted = typeof raw.activeProfileId === 'string' ? raw.activeProfileId : DEFAULT_PROFILE_ID
     const activeProfileId = profiles.some((p) => p.id === wanted) ? wanted : normalProfileId
@@ -333,6 +358,7 @@ export class WebStore {
     } catch {
       /* first run — nothing saved yet */
     }
+    if (this.disposed) return
     const tabs: Record<string, WebTabState> = { ...this.snap.tabs }
     for (const [id, t] of Object.entries(restored)) {
       const cur = tabs[id]
@@ -347,6 +373,7 @@ export class WebStore {
     }
 
     await this.loadProfileLists(activeProfileId)
+    if (this.disposed) return
     this.setSnap({
       settings,
       profiles,
@@ -357,6 +384,7 @@ export class WebStore {
       history: this.histCache.get(activeProfileId) ?? []
     })
     await this.persistProfiles()
+    if (this.disposed) return
     if (activeProfileId !== wanted) void this.api.settings.set('activeProfileId', activeProfileId)
     this.tabsLoaded = true
     // A guest created before the restore landed (empty url → homepage) is now
@@ -388,14 +416,14 @@ export class WebStore {
   }
 
   private pushAdblock(): void {
-    void this.api.backend.call('filter.configure', {
+    void this.trackGuestWork(this.api.backend.call('filter.configure', {
       profiles: this.snap.profiles.map((profile) => ({
         partition: partitionFor(profile.id),
         enabled: profile.adblockEnabled,
         rules: profile.adblockRules,
         frequencyDays: profile.adblockFrequency
       }))
-    }).catch((error) => console.error(error))
+    })).catch((error) => console.error(error))
   }
 
   get settings(): WebSettings {
@@ -521,9 +549,9 @@ export class WebStore {
     if (wasActive) void this.api.settings.set('activeProfileId', activeProfileId)
     const persisted = this.persistProfiles()
     this.persistTabs()
-    this.remountProfileViews(id)
+    const retiredGuests = this.remountProfileViews(id)
     this.syncAdblock()
-    const clearedBrowserData = this.clearBrowserData(id)
+    const clearedBrowserData = retiredGuests.then(() => this.clearBrowserData(id))
     // Drop the deleted profile's per-profile lists (history/favorites/reading).
     const clearedHistory = this.clearHistory(id)
     this.favCache.delete(id)
@@ -552,8 +580,10 @@ export class WebStore {
     )
   }
 
-  private remountProfileViews(profileId: string): void {
-    for (const id of this.views.keys()) if (this.snap.tabs[id]?.profileId === profileId) this.disposeView(id)
+  private async remountProfileViews(profileId: string): Promise<void> {
+    const closing: Promise<void>[] = []
+    for (const [id, owner] of this.guestLifetimes) if (owner.profileId === profileId) closing.push(this.disposeView(id))
+    await Promise.all(closing)
   }
 
   setActiveProfile(id: string): void {
@@ -805,6 +835,7 @@ export class WebStore {
     if (!this.snap.profiles.some((profile) => profile.id === tab.profileId)) throw new Error(uiText('surfing.error.profile'))
     const previous = this.snap.tabs[id]
     if (previous?.profileId !== tab.profileId) this.disposeView(id)
+    else if (previous?.url !== tab.url) this.invalidateGuestRead(id)
     this.setSnap({ tabs: { ...this.snap.tabs, [id]: { ...tab } } })
     this.persistTabs()
     this.drive(id)
@@ -813,21 +844,28 @@ export class WebStore {
 
   private browserGuest<T extends DriverResult>(
     instanceId: string,
-    run: (guestId: string) => Promise<T>
+    run: (guestId: string) => Promise<T>,
+    read = false
   ): Promise<T> {
     const guestId = this.browserGuests.get(instanceId)
-    if (!guestId) {
+    const owner = this.guestLifetimes.get(instanceId)
+    const view = this.views.get(instanceId), revision = view?.revision
+    if (!guestId || !owner?.active()) {
       return Promise.resolve({ ok: false, error: uiText('surfing.error.liveTab', { value: instanceId }) } as T)
     }
-    return run(guestId)
+    return owner.run(() => run(guestId)).then(result => read && (!owner.active() || this.views.get(instanceId) !== view || view?.revision !== revision)
+      ? { ok: false, error: uiText('surfing.error.liveTab', { value: instanceId }) } as T : result)
   }
 
   async listBrowserTabs(): Promise<BrowserTabsResult> {
-    const result = await this.api.drivers.browser.list()
+    if (this.disposed) return { ok: true, data: { tabs: [] } }
+    const captured = new Map(this.browserGuests)
+    const result = await this.trackGuestWork(this.api.drivers.browser.list())
     if (!result.ok) return { ok: false, error: result.error }
+    if (this.disposed) return { ok: true, data: { tabs: [] } }
     const live = new Set((result.data?.guests ?? []).map((guest) => guest.guestId))
-    for (const [instanceId, guestId] of this.browserGuests) {
-      if (!live.has(guestId)) this.browserGuests.delete(instanceId)
+    for (const [instanceId, guestId] of captured) {
+      if (this.browserGuests.get(instanceId) === guestId && !live.has(guestId)) this.disposeView(instanceId)
     }
     const tabs = [...this.browserGuests.keys()].flatMap((instanceId) => {
       const tab = this.snap.tabs[instanceId]
@@ -837,19 +875,19 @@ export class WebStore {
   }
 
   browserSnapshot(instanceId: string): Promise<BrowserSnapshotResult> {
-    return this.browserGuest(instanceId, (guestId) => browserAutomation(this.api).snapshot(guestId))
+    return this.browserGuest(instanceId, (guestId) => browserAutomation(this.api).snapshot(guestId), true)
   }
 
   browserReadText(instanceId: string, maxChars?: number): Promise<BrowserTextResult> {
-    return this.browserGuest(instanceId, (guestId) => browserAutomation(this.api).readText(guestId, maxChars))
+    return this.browserGuest(instanceId, (guestId) => browserAutomation(this.api).readText(guestId, maxChars), true)
   }
 
   browserReadHtml(instanceId: string): Promise<BrowserHtmlResult> {
-    return this.browserGuest(instanceId, (guestId) => browserAutomation(this.api).readHtml(guestId))
+    return this.browserGuest(instanceId, (guestId) => browserAutomation(this.api).readHtml(guestId), true)
   }
 
   browserScreenshot(instanceId: string): Promise<BrowserCaptureResult> {
-    return this.browserGuest(instanceId, (guestId) => this.api.drivers.browser.screenshot(guestId))
+    return this.browserGuest(instanceId, (guestId) => this.api.drivers.browser.screenshot(guestId), true)
   }
 
   browserClick(instanceId: string, ref: number): Promise<BrowserActionResult> {
@@ -873,18 +911,22 @@ export class WebStore {
   }
 
   browserNavigate(instanceId: string, url: string): Promise<BrowserActionResult> {
+    this.invalidateGuestRead(instanceId)
     return this.browserGuest(instanceId, (guestId) => this.api.drivers.browser.navigate(guestId, url))
   }
 
   browserBack(instanceId: string): Promise<BrowserActionResult> {
+    this.invalidateGuestRead(instanceId)
     return this.browserGuest(instanceId, (guestId) => this.api.drivers.browser.back(guestId))
   }
 
   browserForward(instanceId: string): Promise<BrowserActionResult> {
+    this.invalidateGuestRead(instanceId)
     return this.browserGuest(instanceId, (guestId) => this.api.drivers.browser.forward(guestId))
   }
 
   browserReload(instanceId: string): Promise<BrowserActionResult> {
+    this.invalidateGuestRead(instanceId)
     return this.browserGuest(instanceId, (guestId) => this.api.drivers.browser.reload(guestId))
   }
 
@@ -892,6 +934,7 @@ export class WebStore {
   navigate(id: string, input: string): void {
     const url = toUrl(input, this.snap.settings.searchEngine)
     if (this.patch(id, { url, metadata: undefined })) {
+      this.invalidateGuestRead(id)
       this.drive(id)
       this.updateWorkspaceTabTitle(id)
     }
@@ -900,6 +943,7 @@ export class WebStore {
   /** The guest navigated itself — record the real URL + log history (no re-drive). */
   reportUrl(id: string, url: string): void {
     const changed = this.snap.tabs[id]?.url !== url
+    if (changed) this.invalidateGuestRead(id)
     if (this.patch(id, { url, ...(changed ? { metadata: undefined } : {}) })) {
       const tab = this.snap.tabs[id]
       if (tab) this.appendHistory(tab.profileId, url, tab.title)
@@ -913,10 +957,11 @@ export class WebStore {
 
   private async readPageMetadata(id: string, el: WebviewEl): Promise<void> {
     const url = this.snap.tabs[id]?.url
+    const revision = el.revision
     if (!url) return
     try {
       const metadata = normalizePageMetadata(await el.executeJavaScript(PAGE_METADATA_SCRIPT, false))
-      if (this.views.get(id) === el && this.snap.tabs[id]?.url === url) this.patch(id, { metadata })
+      if (this.views.get(id) === el && el.revision === revision && this.snap.tabs[id]?.url === url) this.patch(id, { metadata })
     } catch {
       /* Cross-origin pages may refuse inspection while navigating. */
     }
@@ -951,9 +996,11 @@ export class WebStore {
     }
   }
   goBack(id: string): void {
+    this.invalidateGuestRead(id)
     this.guestCall(id, (v) => v.goBack(), undefined)
   }
   goForward(id: string): void {
+    this.invalidateGuestRead(id)
     this.guestCall(id, (v) => v.goForward(), undefined)
   }
   canGoBack(id: string): boolean {
@@ -963,6 +1010,7 @@ export class WebStore {
     return this.guestCall(id, (v) => v.canGoForward(), false)
   }
   reload(id: string): void {
+    this.invalidateGuestRead(id)
     this.guestCall(id, (v) => v.reload(), undefined)
   }
 
@@ -971,116 +1019,18 @@ export class WebStore {
   async getSelectionText(id: string): Promise<string> {
     const v = this.views.get(id)
     if (!v) return ''
+    const revision = v.revision
     try {
       const text = await v.executeJavaScript('String(window.getSelection?.() ?? "")', false)
-      return typeof text === 'string' ? text.trim() : ''
+      return !this.disposed && this.views.get(id) === v && v.revision === revision && typeof text === 'string' ? text.trim() : ''
     } catch {
       return ''
     }
   }
 
-  // ── Footer media playback ─────────────────────────────────────────────────
-  /** Run JS inside a guest's top frame, swallowing failures (guest not ready,
-   *  cross-origin top frame, navigation in flight). */
-  private guestJs(id: string, code: string): void {
-    const v = this.views.get(id)
-    if (!v) return
-    try {
-      void v.executeJavaScript(code, false).catch(() => undefined)
-    } catch {
-      /* guest detached */
-    }
-  }
-
-  /** Toggle every `<video>`/`<audio>` in the guest's top frame (play↔pause). */
-  private toggleGuestMedia(id: string): void {
-    this.guestJs(
-      id,
-      `(()=>{const m=[...document.querySelectorAll('video,audio')];const p=m.some(e=>!e.paused);m.forEach(e=>{p?e.pause():e.play()})})()`
-    )
-  }
-
-  /** Pause every media element (used when another playback source takes over). */
-  private pauseGuestMedia(id: string): void {
-    this.guestJs(id, `document.querySelectorAll('video,audio').forEach(e=>e.pause())`)
-  }
-
-  /** Set guest media volume (0..1); 0 also mutes. Refreshes the footer slider. */
-  private setGuestVolume(id: string, vol: number): void {
-    const v = Math.max(0, Math.min(1, vol))
-    this.mediaVolume.set(id, v)
-    this.guestJs(id, `document.querySelectorAll('video,audio').forEach(e=>{e.volume=${v};e.muted=${v === 0}})`)
-    if (this.mediaActive.has(id)) {
-      try {
-        this.mediaPlayback.get(id)?.update(this.buildMediaSource(id, true))
-      } catch {
-        /* host not ready */
-      }
-    }
-  }
-
-  private buildMediaSource(id: string, isPlaying: boolean): PlaybackSource {
-    const tab = this.snap.tabs[id]
-    const site = tab ? hostOf(tab.url) : ''
-    return {
-      id: `web:${id}`,
-      title: tab?.title || site || 'Web audio',
-      artist: site || undefined,
-      isPlaying,
-      canSkip: false,
-      volume: this.mediaVolume.get(id) ?? 1,
-      setVolume: (value) => this.setGuestVolume(id, value),
-      toggle: () => this.toggleGuestMedia(id),
-      pause: () => this.pauseGuestMedia(id)
-    }
-  }
-
-  /** Guest media started. Claim the footer only once the page is actually
-   *  audible (skips muted autoplay ads, which would otherwise pause music). */
-  private onGuestMediaPlay(id: string, attempt = 0): void {
-    if (!this.views.get(id)) return
-    let audible = false
-    try {
-      audible = this.views.get(id)?.isCurrentlyAudible() ?? false
-    } catch {
-      audible = true // method unavailable → assume audible
-    }
-    if (!audible) {
-      // Audibility can lag the play event; recheck a few times, then give up.
-      if (attempt < 3) window.setTimeout(() => this.onGuestMediaPlay(id, attempt + 1), 500)
-      return
-    }
-    const stored = this.mediaVolume.get(id)
-    if (stored != null && stored !== 1) this.setGuestVolume(id, stored)
-    this.mediaActive.add(id)
-    try {
-      const source = this.buildMediaSource(id, true)
-      let handle = this.mediaPlayback.get(id)
-      if (!handle) {
-        handle = this.api.playback.register(source)
-        this.mediaPlayback.set(id, handle)
-      }
-      handle.claim(source)
-    } catch {
-      /* host not ready */
-    }
-  }
-
-  private onGuestMediaPause(id: string): void {
-    if (!this.mediaActive.has(id)) return
-    try {
-      this.mediaPlayback.get(id)?.update(this.buildMediaSource(id, false))
-    } catch {
-      /* host not ready */
-    }
-  }
-
-  /** Drop a tab's footer source (on close/dispose) so the bar doesn't strand. */
-  private clearMedia(id: string): void {
-    this.mediaActive.delete(id)
-    this.mediaPlayback.get(id)?.dispose()
-    this.mediaPlayback.delete(id)
-    this.mediaVolume.delete(id)
+  private invalidateGuestRead(id: string): void {
+    const view = this.views.get(id)
+    if (view) view.revision = (view.revision ?? 0) + 1
   }
 
   private drive(id: string): void {
@@ -1106,6 +1056,7 @@ export class WebStore {
   }
 
   startOverlay(): void {
+    if (this.disposed) return
     if (this.reconcileTimer == null) this.reconcileTimer = window.setInterval(() => this.reconcile(), 1500)
   }
 
@@ -1115,50 +1066,97 @@ export class WebStore {
     return () => { this.hosts.delete(id); this.reconcile() }
   }
 
-  readyGuest(id: string, event: PluginBrowserGuestEvent): void {
-    if (this.browserGuests.get(id) !== event.guestId) this.guestEvent(id, event)
+  guestTarget(id: string): GuestTarget | undefined {
+    const tab = this.snap.tabs[id]
+    if (this.disposed || !tab) return
+    let target = this.guestTargets.get(id)
+    if (!target || target.profileId !== tab.profileId) {
+      target = Object.freeze({ instanceId: id, profileId: tab.profileId })
+      this.guestTargets.set(id, target)
+    }
+    return target
   }
 
-  guestEvent(id: string, event: PluginBrowserGuestEvent): void {
-    if (!this.snap.tabs[id]) return
-    if (event.type === 'ready' && event.guestId) {
+  bindGuest(id: string, target = this.guestTarget(id)) {
+    let active = true
+    const current = (): boolean => active && target !== undefined && this.guestTarget(id) === target
+    return {
+      target,
+      prepare: async (): Promise<void> => {
+        if (!current()) return
+        await this.trackGuestWork(this.api.backend.call('filter.prepare', { partition: partitionFor(target!.profileId) }))
+      },
+      onReady: (event: PluginBrowserGuestEvent): void => { if (current()) this.readyGuest(id, event, target) },
+      dispose: (): void => { active = false }
+    }
+  }
+
+  readyGuest(id: string, event: PluginBrowserGuestEvent, target = this.guestTarget(id)): void {
+    if (!target || this.guestTarget(id) !== target || this.disposed) return
+    if (this.browserGuests.get(id) !== event.guestId) this.guestEvent(id, event, true)
+  }
+
+  guestEvent(id: string, event: PluginBrowserGuestEvent, acceptReady = false): void {
+    if (this.disposed || !this.snap.tabs[id]) return
+    if ((!acceptReady || event.type !== 'ready') && this.browserGuests.get(id) !== event.guestId) return
+    if (event.type === 'ready' && event.guestId && (this.browserGuests.get(id) !== event.guestId || !this.views.has(id))) {
+      const target = this.guestTarget(id)!
+      if (this.browserGuests.get(id) !== event.guestId) this.disposeView(id, true)
       this.browserGuests.set(id, event.guestId)
       const guestId = event.guestId
       const driver = this.api.drivers.browser
+      let owner!: GuestLifetime
       const value: WebviewEl = {
-        guestId, url: event.url ?? '', back: !!event.canGoBack, forward: !!event.canGoForward, audible: !!event.audible,
-        loadURL: async (url) => { const result = await driver.navigate(guestId, url); if (!result.ok) throw new Error(result.error) },
+        revision: 0, guestId, url: event.url ?? '', back: !!event.canGoBack, forward: !!event.canGoForward, audible: !!event.audible,
+        loadURL: async (url) => { const result = await owner.run(() => driver.navigate(guestId, url)); if (!result.ok) throw new Error(result.error) },
         getURL: () => value.url,
-        reload: () => { void driver.reload(guestId) },
+        reload: () => { void owner.run(() => driver.reload(guestId)).catch(() => {}) },
         canGoBack: () => value.back, canGoForward: () => value.forward,
-        goBack: () => { void driver.back(guestId) }, goForward: () => { void driver.forward(guestId) },
-        executeJavaScript: async (script, userGesture) => { const result = await driver.execute(guestId, script, userGesture); if (!result.ok) throw new Error(result.error); return result.data },
+        goBack: () => { void owner.run(() => driver.back(guestId)).catch(() => {}) }, goForward: () => { void owner.run(() => driver.forward(guestId)).catch(() => {}) },
+        executeJavaScript: async (script, userGesture) => { const result = await owner.run(() => driver.execute(guestId, script, userGesture)); if (!result.ok) throw new Error(result.error); return result.data },
         isCurrentlyAudible: () => value.audible
       }
+      owner = createGuestLifetime(this.api, {
+        instanceId: id, guestId, profileId: target.profileId,
+        current: () => !this.disposed && this.guestTarget(id) === target && this.views.get(id) === value,
+        page: () => this.snap.tabs[id], audible: () => value.audible
+      })
+      this.guestLifetimes.set(id, owner)
       this.views.set(id, value)
     }
     const view = this.views.get(id)
     if (!view) return
+    if (event.type === 'load' || event.type === 'ready' || event.type === 'navigate') this.invalidateGuestRead(id)
     if (event.url) { view.url = event.url; this.reportUrl(id, event.url) }
     if (event.title) this.setTitle(id, event.title)
     if (event.canGoBack !== undefined) view.back = event.canGoBack
     if (event.canGoForward !== undefined) view.forward = event.canGoForward
     if (event.audible !== undefined) view.audible = event.audible
-    if (event.type === 'ready') { this.cosmetics.get(id)?.(); this.cosmetics.set(id, watchBrowserCosmetics(this.api, view.guestId, partitionFor(this.snap.tabs[id].profileId))) }
+    if (event.type === 'ready') {
+      const previous = this.cosmetics.get(id)
+      if (previous) void this.trackGuestWork(this.guestLifetimes.get(id)!.run(previous)).catch(error => console.error(error))
+      this.cosmetics.set(id, watchBrowserCosmetics(this.api, view.guestId, partitionFor(this.snap.tabs[id].profileId), {
+        active: () => !this.disposed && this.views.get(id) === view,
+        revision: () => view.revision ?? 0
+      }))
+    }
     if (event.type === 'load' || event.type === 'ready') void this.readPageMetadata(id, view)
-    if (event.type === 'media') { if (event.playing) this.onGuestMediaPlay(id); else this.onGuestMediaPause(id) }
+    if (event.type === 'media') { if (event.playing) this.guestLifetimes.get(id)?.play(); else this.guestLifetimes.get(id)?.pause() }
     if (event.type === 'command') { if (event.command === 'browser-backward') this.goBack(id); if (event.command === 'browser-forward') this.goForward(id) }
     this.setSnap({})
   }
 
-  private disposeView(id: string): void {
-    this.cosmetics.get(id)?.()
+  private disposeView(id: string, preserveTarget = false): Promise<void> {
+    const cosmetics = this.cosmetics.get(id)
     this.cosmetics.delete(id)
-    this.clearMedia(id)
-    const guestId = this.browserGuests.get(id)
+    const owner = this.guestLifetimes.get(id)
+    this.guestLifetimes.delete(id)
+    if (!preserveTarget) this.guestTargets.delete(id)
     this.browserGuests.delete(id)
     this.views.delete(id)
-    if (guestId) void this.api.drivers.browser.close(guestId)
+    const closing = owner ? owner.dispose(cosmetics) : cosmetics ? cosmetics() : Promise.resolve()
+    void this.trackGuestWork(closing).catch(error => { this.guestFailure ??= error })
+    return closing
   }
 
   private reconcile(): void {
@@ -1166,7 +1164,9 @@ export class WebStore {
     for (const id of this.views.keys()) if (!open.has(id) && !this.hosts.has(id)) this.closeTab(id)
   }
 
-  dispose(): void {
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal
+    this.disposed = true
     if (this.persistTimer != null) clearTimeout(this.persistTimer)
     this.persistTimer = null
     // A pending ad-block push belongs to this session's driver handle — let it
@@ -1177,17 +1177,22 @@ export class WebStore {
       this.pushAdblock()
     }
     this.offBrowser()
+    this.offState()
     if (this.reconcileTimer != null) clearInterval(this.reconcileTimer)
     this.reconcileTimer = null
     for (const id of this.views.keys()) this.disposeView(id)
     this.hosts.clear()
     this.listeners.clear()
+    return this.disposal = (async () => {
+      while (this.guestWork.size) await Promise.allSettled([...this.guestWork])
+      if (this.guestFailure) throw this.guestFailure
+    })()
   }
 }
 
 export function createStore(api: ValleyPluginApi): WebStore {
   const holder = api.runtime.getOrCreate<{ current: WebStore | null }>(STORE_KEY, () => ({ current: null }))
-  holder.current?.dispose()
+  void holder.current?.dispose().catch(error => console.error(error))
   const store = new WebStore(api)
   holder.current = store
   return store
@@ -1197,9 +1202,9 @@ export function getStore(): WebStore | null {
   return runtimeApi.runtime.getOrCreate<{ current: WebStore | null }>(STORE_KEY, () => ({ current: null })).current
 }
 
-export function disposeStore(api: ValleyPluginApi, store: WebStore): void {
+export function disposeStore(api: ValleyPluginApi, store: WebStore): Promise<void> {
   const holder = api.runtime.getOrCreate<{ current: WebStore | null }>(STORE_KEY, () => ({ current: null }))
-  if (holder.current !== store) return
-  store.dispose()
-  holder.current = null
+  const disposed = store.dispose()
+  if (holder.current === store) holder.current = null
+  return disposed
 }

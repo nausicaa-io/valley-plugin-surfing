@@ -192,8 +192,8 @@
   "surfing.embedValidation.fit": "Die Konfiguration für die Breitenanpassung muss ein Objekt sein.",
   "surfing.embedValidation.fitFields": "Die Breitenanpassung benötigt gültige Werte für naturalWidth und maxScale.",
   "surfing.embedValidation.theme": "Die Theme-Konfiguration muss ein Objekt sein.",
-  "surfing.embedValidation.themeFields": "Die Theme-Konfiguration benötigt queryParameter sowie Werte für light, reading und dark.",
-  "surfing.embedValidation.themeValues": "Die Theme-Konfiguration benötigt nicht leere Werte für light, reading und dark.",
+  "surfing.embedValidation.themeFields": "Die Theme-Konfiguration benötigt queryParameter sowie Werte für light und dark.",
+  "surfing.embedValidation.themeValues": "Die Theme-Konfiguration benötigt nicht leere Werte für light und dark.",
   "surfing.embedValidation.definition": "Die Anbieterdefinition muss ein JSON-Objekt sein.",
   "surfing.embedValidation.identity": "Der Anbieter benötigt schemaVersion 1 sowie gültige Werte für id, displayName und language; id muss dem Ordner entsprechen.",
   "surfing.embedValidation.reserved": "Die Sprache „{{value}}“ ist reserviert.",
@@ -210,5 +210,7 @@
   "surfing.embedValidation.missingFile": "Der Anbieterordner benötigt {{value}}.",
   "surfing.embedValidation.unique": "Anbieter-IDs und Sprachen müssen eindeutig sein.",
   "surfing.embedValidation.custom": "Eigener Anbieter",
-  "surfing.embed.customize": "Anpassen"
+  "surfing.embed.customize": "Anpassen",
+  "surfing.error.deletedWithDraft": "Die Datei wurde gelöscht. Neuerer Text im Editor wurde zur Wiederherstellung gesichert. Speichere ihn, bevor du fortfährst.",
+  "surfing.error.deletedRecoveryFailed": "Die Datei wurde gelöscht, aber neuerer Text im Editor konnte nicht zur Wiederherstellung gesichert werden. Lass den Editor geöffnet und speichere den Text, bevor du fortfährst."
 }
