@@ -28,13 +28,11 @@ const Svg = (props: IconProps & { children: ReactNode }): ReactElement =>
     props.children
   )
 
-/** An "open externally" glyph — opens a new browser tab in the chosen profile. */
-export const ExternalIcon = (p: IconProps): ReactElement => (
-  <Svg {...p}>
-    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-    <polyline points="15 3 21 3 21 9" />
-    <line x1="10" y1="14" x2="21" y2="3" />
-  </Svg>
+export const ValleyIcon = (p: IconProps): ReactElement => (
+  <svg className={p.className} width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true"
+    style={{ mask: 'var(--icon-open-in-new) center / contain no-repeat' }}>
+    <rect width="24" height="24" fill="currentColor" />
+  </svg>
 )
 
 /** A private/incognito glyph — the switcher's permanent "new private tab" row.

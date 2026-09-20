@@ -11,7 +11,7 @@ import {
   type TimelineGroupKey,
   type WebProfile
 } from './profiles'
-import { ChevronIcon, ExternalIcon, EyeglassesIcon, IncognitoIcon, ProfileMark } from './icons'
+import { ChevronIcon, ValleyIcon, EyeglassesIcon, IncognitoIcon, ProfileMark } from './icons'
 import { uiText } from './localization'
 
 /** Hostname for the secondary line of a saved-page row (falls back to the url). */
@@ -273,7 +273,7 @@ export const Panel: FC = () => {
           onPrivate={openPrivateTab}
         />
         <button className="web-icon-btn" title={uiText('auto.7b144127f2b1')} aria-label={uiText('auto.7b144127f2b1')} onClick={openNewTab}>
-          <ExternalIcon />
+          <ValleyIcon />
         </button>
       </div>
 
