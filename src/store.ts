@@ -2,7 +2,7 @@ import { uiText } from './localization'
 import { watchBrowserCosmetics } from './browserCosmetics'
 import { browserAutomation } from './browserAutomation'
 import { createGuestLifetime, type GuestLifetime } from './guestLifetime'
-import type { PluginBrowserGuestEvent } from '@valley/plugin-sdk'
+import type { PluginBrowserConnection, PluginBrowserGuestEvent } from '@valley/plugin-sdk'
 import type {
   BrowserActionResult,
   BrowserCaptureResult,
@@ -36,12 +36,14 @@ import {
   type WebSettings
 } from './profiles'
 import { api as runtimeApi } from './runtime'
+import type { WebFetchErrorCode, WebFetchMode, WebFetchPage } from './webFetch'
 
 export interface WebTabState {
   url: string
   title: string
   profileId: string
   metadata?: WebPageMetadata
+  connection?: PluginBrowserConnection
 }
 
 export interface GuestTarget { readonly instanceId: string; readonly profileId: string }
@@ -57,6 +59,23 @@ export interface WebPageMetadata {
   language?: string
 }
 
+/** One assistant URL fetch shown live in the sidebar; kept in memory for the session only. */
+export interface WebAgentActivity {
+  id: string
+  url: string
+  title: string
+  mode: WebFetchMode
+  state: 'running' | 'done' | 'error'
+  ts: number
+  status?: number | null
+  contentType?: string
+  bytes?: number
+  durationMs?: number
+  cached?: boolean
+  error?: WebFetchErrorCode | null
+  instanceId?: string
+}
+
 export interface WebSnapshot {
   tabs: Record<string, WebTabState>
   profiles: WebProfile[]
@@ -69,6 +88,7 @@ export interface WebSnapshot {
   favorites: SavedPage[]
   readingList: SavedPage[]
   history: SavedPage[]
+  agentActivity: WebAgentActivity[]
 }
 
 interface WebviewEl {
@@ -97,6 +117,7 @@ const VISITS_DATASET = 'visits'
 const SAVED_PAGES_DATASET = 'saved_pages'
 /** Coalescing window for `setAdblock` pushes (ms) — see {@link WebStore.syncAdblock}. */
 const ADBLOCK_SYNC_DELAY = 250
+const AGENT_ACTIVITY_LIMIT = 50
 const PAGE_METADATA_SCRIPT = `(() => {
   const content = (...selectors) => {
     for (const selector of selectors) {
@@ -165,7 +186,8 @@ export class WebStore {
     settings: DEFAULT_SETTINGS,
     favorites: [],
     readingList: [],
-    history: []
+    history: [],
+    agentActivity: []
   }
   private lastHistoryUrl = new Map<string, string>()
   private profileWrites: Promise<void> = Promise.resolve()
@@ -209,6 +231,8 @@ export class WebStore {
   private reconcileTimer: number | null = null
   private offBrowser: () => void
   private offState: () => void
+  private agentTabId: string | null = null
+  private loadWaiters = new Map<string, Set<(result: 'load' | 'timeout') => void>>()
 
   constructor(api: ValleyPluginApi) {
     this.api = api
@@ -281,7 +305,7 @@ export class WebStore {
     const cur = this.snap.tabs[id]
     if (!cur) return false
     const next = { ...cur, ...p }
-    if (next.url === cur.url && next.title === cur.title && next.profileId === cur.profileId && JSON.stringify(next.metadata) === JSON.stringify(cur.metadata)) return false
+    if (next.url === cur.url && next.title === cur.title && next.profileId === cur.profileId && JSON.stringify(next.metadata) === JSON.stringify(cur.metadata) && JSON.stringify(next.connection) === JSON.stringify(cur.connection)) return false
     this.setSnap({ tabs: { ...this.snap.tabs, [id]: next } })
     this.persistTabs()
     return true
@@ -746,6 +770,68 @@ export class WebStore {
     this.syncActiveLists(profileId)
   }
 
+  // ── Assistant activity (session-only, never persisted) ────────────────────
+  beginAgentActivity(entry: { url: string; mode: WebFetchMode; title: string }): string {
+    const id = `fetch-${Date.now().toString(36)}-${(counter++).toString(36)}`
+    this.setSnap({ agentActivity: [{ id, ...entry, state: 'running' as const, ts: Date.now() }, ...this.snap.agentActivity].slice(0, AGENT_ACTIVITY_LIMIT) })
+    return id
+  }
+
+  finishAgentActivity(id: string, page: WebFetchPage): void {
+    this.updateAgentActivity(id, {
+      state: 'done', url: page.url, title: page.title || hostOf(page.url), status: page.status, contentType: page.contentType,
+      bytes: page.bytes, durationMs: page.durationMs, cached: page.cached, instanceId: page.instanceId
+    })
+  }
+
+  failAgentActivity(id: string, error: WebFetchErrorCode | null, durationMs: number): void {
+    this.updateAgentActivity(id, { state: 'error', error, durationMs })
+  }
+
+  clearAgentActivity(): void {
+    this.setSnap({ agentActivity: this.snap.agentActivity.filter((entry) => entry.state === 'running') })
+  }
+
+  private updateAgentActivity(id: string, patch: Partial<WebAgentActivity>): void {
+    if (!this.snap.agentActivity.some((entry) => entry.id === id)) return
+    this.setSnap({ agentActivity: this.snap.agentActivity.map((entry) => entry.id === id ? { ...entry, ...patch } : entry) })
+  }
+
+  /** Load a URL in the one visible tab the assistant reads rendered pages from, opening it when needed. */
+  openAgentTab(url: string): string {
+    const current = this.agentTabId && this.snap.tabs[this.agentTabId] ? this.agentTabId : null
+    if (current) {
+      if (this.snap.tabs[current].url === url) void this.browserReload(current)
+      else this.navigate(current, url)
+      this.api.workspace.openMainTab({ instanceId: current })
+      return current
+    }
+    const id = this.openTab(url)
+    this.agentTabId = id
+    this.api.workspace.openMainTab({ instanceId: id, title: hostOf(url), newTab: true })
+    return id
+  }
+
+  /** Resolve when the tab's guest finishes loading, or report a timeout; rejects only on cancellation. */
+  waitForLoad(id: string, timeoutMs: number, cancellation?: AbortSignal): Promise<'load' | 'timeout'> {
+    return new Promise((resolve, reject) => {
+      const waiters = this.loadWaiters.get(id) ?? new Set<(result: 'load' | 'timeout') => void>()
+      this.loadWaiters.set(id, waiters)
+      const release = (): void => {
+        window.clearTimeout(timer)
+        waiters.delete(settle)
+        if (!waiters.size) this.loadWaiters.delete(id)
+        cancellation?.removeEventListener('abort', abort)
+      }
+      const settle = (result: 'load' | 'timeout'): void => { release(); resolve(result) }
+      const abort = (): void => { release(); reject(cancellation?.reason ?? new Error('Cancelled')) }
+      const timer = window.setTimeout(() => settle('timeout'), timeoutMs)
+      waiters.add(settle)
+      if (cancellation?.aborted) abort()
+      else cancellation?.addEventListener('abort', abort, { once: true })
+    })
+  }
+
   /** Open a saved/historical url as its own browser tab (used by the sidebar lists). */
   openUrl(url: string, title = ''): string {
     const id = this.openTab(url)
@@ -933,7 +1019,7 @@ export class WebStore {
   /** Address-bar / panel navigation (normalizes input + drives the guest). */
   navigate(id: string, input: string): void {
     const url = toUrl(input, this.snap.settings.searchEngine)
-    if (this.patch(id, { url, metadata: undefined })) {
+    if (this.patch(id, { url, metadata: undefined, connection: undefined })) {
       this.invalidateGuestRead(id)
       this.drive(id)
       this.updateWorkspaceTabTitle(id)
@@ -944,7 +1030,7 @@ export class WebStore {
   reportUrl(id: string, url: string): void {
     const changed = this.snap.tabs[id]?.url !== url
     if (changed) this.invalidateGuestRead(id)
-    if (this.patch(id, { url, ...(changed ? { metadata: undefined } : {}) })) {
+    if (this.patch(id, { url, ...(changed ? { metadata: undefined, connection: undefined } : {}) })) {
       const tab = this.snap.tabs[id]
       if (tab) this.appendHistory(tab.profileId, url, tab.title)
       this.updateWorkspaceTabTitle(id)
@@ -1128,6 +1214,7 @@ export class WebStore {
     if (!view) return
     if (event.type === 'load' || event.type === 'ready' || event.type === 'navigate') this.invalidateGuestRead(id)
     if (event.url) { view.url = event.url; this.reportUrl(id, event.url) }
+    if (event.connection) this.patch(id, { connection: event.connection })
     if (event.title) this.setTitle(id, event.title)
     if (event.canGoBack !== undefined) view.back = event.canGoBack
     if (event.canGoForward !== undefined) view.forward = event.canGoForward
@@ -1141,6 +1228,7 @@ export class WebStore {
       }))
     }
     if (event.type === 'load' || event.type === 'ready') void this.readPageMetadata(id, view)
+    if (event.type === 'load') for (const settle of [...this.loadWaiters.get(id) ?? []]) settle('load')
     if (event.type === 'media') { if (event.playing) this.guestLifetimes.get(id)?.play(); else this.guestLifetimes.get(id)?.pause() }
     if (event.type === 'command') { if (event.command === 'browser-backward') this.goBack(id); if (event.command === 'browser-forward') this.goForward(id) }
     this.setSnap({})

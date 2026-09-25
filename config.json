@@ -1,6 +1,36 @@
 {
   "icon": "globe",
   "main": "runtime/index.js",
+  "fileViews": {
+    ".url": {
+      "view": "surfing.url",
+      "icon": "globe",
+      "label": "Internet shortcut",
+      "labelKey": "surfing.shortcut.fileType",
+      "editable": true
+    },
+    ".mhtml": {
+      "view": "surfing.mhtml",
+      "icon": "globe",
+      "label": "Saved web page",
+      "labelKey": "surfing.archive.mhtml",
+      "editable": false
+    },
+    ".mht": {
+      "view": "surfing.mhtml",
+      "icon": "globe",
+      "label": "Saved web page",
+      "labelKey": "surfing.archive.mhtml",
+      "editable": false
+    },
+    ".har": {
+      "view": "surfing.har",
+      "icon": "globe",
+      "label": "HTTP archive",
+      "labelKey": "surfing.archive.har",
+      "editable": false
+    }
+  },
   "indexState": "scoped",
   "keepTabIcon": true,
   "showOnNewTab": true,
@@ -243,6 +273,11 @@
       "id": "metadataPanel.segment",
       "kind": "extension",
       "version": "1.0.0"
+    },
+    {
+      "id": "workspace.details",
+      "kind": "extension",
+      "version": "1.0.0"
     }
   ],
   "consumes": [
@@ -260,8 +295,9 @@
       {
         "id": "recommended",
         "label": "Recommended",
-        "version": 1,
-        "description": "Reading and screenshotting pages is free; navigating, clicking, typing and opening tabs confirm first.",
+        "version": 2,
+        "description": "Reading pages, screenshots and background URL fetches are free; navigating, clicking, typing, opening tabs and fetching in a visible tab confirm first.",
+        "descriptionKey": "surfing.guard.recommended",
         "entries": {
           "tools": {
             "browser_open_tab": {
@@ -309,6 +345,15 @@
               "allowPreApproval": false
             },
             "browser_press_key": {
+              "decision": "confirm",
+              "allowPreApproval": false
+            },
+            "browser_fetch_url": {
+              "decision": "allow"
+            }
+          },
+          "commands": {
+            "fetch-rendered": {
               "decision": "confirm",
               "allowPreApproval": false
             }
@@ -319,8 +364,9 @@
         "id": "allow-browsing",
         "label": "Allow browsing",
         "labelKey": "auto.135f8a7fe1ef",
-        "version": 1,
-        "description": "Let the assistant browse autonomously — navigate, click, type and open tabs without confirming each step.",
+        "version": 2,
+        "description": "Let the assistant browse autonomously — navigate, click, type, open tabs and fetch URLs without confirming each step.",
+        "descriptionKey": "surfing.guard.allow-browsing",
         "entries": {
           "tools": {
             "browser_open_tab": {
@@ -357,6 +403,14 @@
               "decision": "allow"
             },
             "browser_press_key": {
+              "decision": "allow"
+            },
+            "browser_fetch_url": {
+              "decision": "allow"
+            }
+          },
+          "commands": {
+            "fetch-rendered": {
               "decision": "allow"
             }
           }
@@ -365,8 +419,9 @@
       {
         "id": "read-only",
         "label": "Read-only",
-        "version": 1,
-        "description": "The assistant can read and screenshot pages, but never navigate, click, type or open tabs.",
+        "version": 2,
+        "description": "The assistant can read and screenshot pages and fetch URLs in the background, but never navigate, click, type or open tabs.",
+        "descriptionKey": "surfing.guard.read-only",
         "entries": {
           "tools": {
             "browser_open_tab": {
@@ -403,6 +458,14 @@
               "decision": "deny"
             },
             "browser_press_key": {
+              "decision": "deny"
+            },
+            "browser_fetch_url": {
+              "decision": "allow"
+            }
+          },
+          "commands": {
+            "fetch-rendered": {
               "decision": "deny"
             }
           }
@@ -434,6 +497,9 @@
         "raw.githubusercontent.com"
       ],
       "allowUserEndpoints": true
+    },
+    "storage": {
+      "vault": true
     }
   }
 }

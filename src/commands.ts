@@ -2,11 +2,7 @@ import { createUiText, uiText } from './localization'
 import type { BrowserAutomationService, BrowserActionResult, ValleyPluginApi } from '@valley/plugin-sdk'
 import type { TextDocumentRead } from '@valley/plugin-sdk/types'
 import type { WebStore } from './store'
-import { Readability } from '@mozilla/readability'
-import DOMPurify from 'dompurify'
-import TurndownService from 'turndown'
-
-const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '-' })
+import { FETCH_MAX_CHARS, formatFetchResult, htmlToMarkdown, type WebFetcher, type WebFetchInput, type WebFetchPage } from './webFetch'
 
 interface ClipInput {
   instanceId: string
@@ -36,7 +32,7 @@ export function createBrowserAutomationService(
     list: () => store.listBrowserTabs(),
     open: async (url) => {
       const instanceId = store.openTab(url)
-      api.workspace.openMainTab({ instanceId, title: url.trim() || 'New tab' })
+      api.workspace.openMainTab({ instanceId, title: url.trim() || uiText('auto.6f23a36f0aa1') })
       const tab = store.getTab(instanceId)
       return { ok: true, data: { instanceId, url: tab?.url ?? '', title: tab?.title } }
     },
@@ -94,11 +90,44 @@ async function clippingPath(
   throw new Error(uiText('surfing.error.clipName'))
 }
 
+export const FETCH_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    url: { type: 'string', minLength: 1, description: 'Absolute http(s) URL; http is upgraded to https' },
+    maxChars: { type: 'integer', minimum: 500, maximum: FETCH_MAX_CHARS, description: 'Characters to return (default 12000)' },
+    startIndex: { type: 'integer', minimum: 0, description: 'Character offset to continue from, as reported by the previous result' }
+  },
+  required: ['url'],
+  additionalProperties: false
+} as const
+
+export function parseFetchInput(raw: unknown): WebFetchInput {
+  const value = raw ?? {}
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error(uiText('surfing.error.input'))
+  const input = value as Record<string, unknown>
+  for (const key of Object.keys(input)) if (!(key in FETCH_INPUT_SCHEMA.properties)) throw new Error(uiText('surfing.error.invalid', { value: key }))
+  if (typeof input.url !== 'string' || !input.url.trim()) throw new Error(uiText('surfing.error.required', { value: 'url' }))
+  const count = (key: 'maxChars' | 'startIndex'): number | undefined => {
+    const item = input[key]
+    if (item === undefined) return undefined
+    if (typeof item !== 'number' || !Number.isFinite(item) || item < 0) throw new Error(uiText('surfing.error.invalid', { value: key }))
+    return Math.floor(item)
+  }
+  const maxChars = count('maxChars'), startIndex = count('startIndex')
+  return { url: input.url.trim(), ...(maxChars === undefined ? {} : { maxChars }), ...(startIndex === undefined ? {} : { startIndex }) }
+}
+
+const fetchFromCli = (args: string[], flags: Record<string, string | boolean>): unknown => ({
+  url: args.join(' ').trim(),
+  ...(flags['max-chars'] === undefined ? {} : { maxChars: Number(flags['max-chars']) }),
+  ...(flags['start-index'] === undefined ? {} : { startIndex: Number(flags['start-index']) })
+})
+
 /**
- * Register the user-facing `web:*` command-bus commands for ⌘P and CLI. Plugin
+ * Register the user-facing `surfing:*` command-bus commands for ⌘P and CLI. Plugin
  * automation uses the separately registered `browser.automation` service.
  */
-export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () => Promise<void> {
+export function registerWebCommands(api: ValleyPluginApi, store: WebStore, fetcher: WebFetcher): () => Promise<void> {
   const uiText = createUiText(api)
   const root = api.getState().vault?.path
   const pending = new Set<Promise<unknown>>()
@@ -144,7 +173,7 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
       label: 'Surfing: list open tabs', labelKey: 'auto.f5734ca3ccaf',
       paletteSafe: false,
       sideEffect: 'read',
-      usage: 'web list',
+      usage: 'surfing list',
       run: () => {
         const snap = store.getSnapshot()
         const tabs = Object.entries(snap.tabs).map(([instanceId, tab]) => ({
@@ -171,7 +200,7 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
         parse: (raw) => {
           const o = (raw ?? {}) as Record<string, unknown>
           const instanceId = typeof o.instanceId === 'string' ? o.instanceId.trim() : ''
-          if (!instanceId) throw new Error(uiText('surfing.error.usage', { value: 'web switch <instanceId>' }))
+          if (!instanceId) throw new Error(uiText('surfing.error.usage', { value: 'surfing switch <instanceId>' }))
           return { instanceId }
         },
         fromCli: (args) => ({ instanceId: args.join(' ').trim() })
@@ -193,7 +222,7 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
         parse: (raw) => {
           const o = (raw ?? {}) as Record<string, unknown>
           const instanceId = typeof o.instanceId === 'string' ? o.instanceId.trim() : ''
-          if (!instanceId) throw new Error(uiText('surfing.error.usage', { value: 'web close <instanceId>' }))
+          if (!instanceId) throw new Error(uiText('surfing.error.usage', { value: 'surfing close <instanceId>' }))
           return { instanceId }
         },
         fromCli: (args) => ({ instanceId: args.join(' ').trim() })
@@ -212,7 +241,7 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
       label: 'Surfing: Clip page to Markdown…', labelKey: 'auto.72f4410a7ff5',
       paletteSafe: false,
       sideEffect: 'write',
-      usage: 'web clip <instanceId> [--collision keep-both|overwrite|cancel]',
+      usage: 'surfing clip <instanceId> [--collision keep-both|overwrite|cancel]',
       input: {
         schema: { type: 'object', properties: { instanceId: { type: 'string', minLength: 1 }, collision: { type: 'string', enum: ['keep-both', 'overwrite', 'cancel'], default: 'keep-both' } }, required: ['instanceId'], additionalProperties: false },
         parse: (raw) => {
@@ -245,19 +274,10 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
         const response = await store.browserReadHtml(instanceId)
         assertActive()
         if (!response.ok || !response.data?.html) throw new Error(response.error || uiText('surfing.error.readPage'))
-        const document = new DOMParser().parseFromString(response.data.html, 'text/html')
-        const base = document.createElement('base')
-        base.href = response.data.url
-        document.head.prepend(base)
-        const article = new Readability(document).parse()
-        if (!article?.content) throw new Error(uiText('surfing.error.noArticle'))
-        const cleanHtml = DOMPurify.sanitize(article.content, {
-          FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
-          FORBID_ATTR: ['style', 'onerror', 'onclick', 'onload']
-        })
-        const markdown = turndown.turndown(cleanHtml).trim()
-        if (!markdown) throw new Error(uiText('surfing.error.noArticle'))
-        const title = article.title?.trim() || response.data.title.trim() || 'Untitled clipping'
+        const article = htmlToMarkdown(response.data.html, response.data.url)
+        if (!article.article || !article.markdown) throw new Error(uiText('surfing.error.noArticle'))
+        const markdown = article.markdown
+        const title = article.title || response.data.title.trim() || 'Untitled clipping'
         const target = await clippingPath(api, title, collision, assertActive)
         if (!target) return { value: { cancelled: true as const }, revert: null }
         const content = [
@@ -317,6 +337,31 @@ export function registerWebCommands(api: ValleyPluginApi, store: WebStore): () =
         const result = value as { cancelled?: boolean; relPath?: string }
         return result.cancelled ? 'Clipping cancelled.' : `Clipped page to ${result.relPath}.`
       }
+    }),
+    api.commands.register<WebFetchInput, WebFetchPage, 'read'>({
+      id: 'fetch',
+      label: 'Surfing: Fetch a web page as Markdown', labelKey: 'surfing.command.fetch',
+      paletteSafe: false,
+      agentVisibility: 'hidden',
+      sideEffect: 'read',
+      timeoutMs: 60_000,
+      usage: 'surfing fetch <url> [--max-chars N] [--start-index N]',
+      input: { schema: FETCH_INPUT_SCHEMA, parse: parseFetchInput, fromCli: fetchFromCli },
+      run: (input, context) => fetcher.fetch(input, context.cancellation),
+      formatCli: formatFetchResult
+    }),
+    api.commands.register<WebFetchInput, WebFetchPage, 'write'>({
+      id: 'fetch-rendered',
+      label: 'Surfing: Fetch a rendered web page in a visible tab', labelKey: 'surfing.command.fetch-rendered',
+      paletteSafe: false,
+      agentVisibility: 'hidden',
+      sideEffect: 'write',
+      timeoutMs: 90_000,
+      usage: 'surfing fetch-rendered <url> [--max-chars N] [--start-index N]',
+      input: { schema: FETCH_INPUT_SCHEMA, parse: parseFetchInput, fromCli: fetchFromCli },
+      preview: (input) => ({ action: 'fetch-rendered', ...input }),
+      run: async (input, context) => ({ value: await fetcher.fetchRendered(input, context.cancellation), revert: null }),
+      formatCli: formatFetchResult
     })
   ]
   return () => {

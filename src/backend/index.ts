@@ -2,6 +2,8 @@ import { FiltersEngine, Request, type RequestType } from '@ghostery/adblocker'
 import { z } from 'zod'
 import type { PluginBackendApi } from '@valley/plugin-sdk'
 import { DEFAULT_ADBLOCK_RULES, normalizeProfileAdblock, partitionFor } from '../profiles'
+import { registerArchiveReader } from './archives'
+import { registerFetch } from './fetch'
 
 const profileSchema = z.object({ partition: z.string().max(256), enabled: z.boolean(), rules: z.string().max(64 * 1024), frequencyDays: z.number().int().min(0).max(3650) }).strict()
 const requestSchema = z.object({ partition: z.string().max(256), phase: z.enum(['request', 'response']).optional(), url: z.string().url().max(8192), type: z.string().max(64), method: z.string().max(64), sourceUrl: z.string().max(8192) }).strict()
@@ -129,4 +131,9 @@ export function createFilters(api: PluginBackendApi) {
   }
   return { configure, request, cosmetics, register() { off.add(api.rpc.handle('filter.configure', configure)); off.add(api.rpc.handle('filter.prepare', async (raw) => { const value = z.object({ partition: z.string().max(256) }).strict().parse(raw); await engine(value.partition) })); off.add(api.rpc.handle('filter.request', request)); off.add(api.rpc.handle('filter.cosmetics', cosmetics)); return () => { disposed = true; configurationRevision++; off.forEach((dispose) => dispose()); off.clear(); engines.clear(); profiles.clear() } } }
 }
-export function register(api: PluginBackendApi): () => void { return createFilters(api).register() }
+export function register(api: PluginBackendApi): () => void {
+  const offFilters = createFilters(api).register()
+  const offArchives = registerArchiveReader(api)
+  const offFetch = registerFetch(api)
+  return () => { offFetch(); offArchives(); offFilters() }
+}

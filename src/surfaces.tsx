@@ -54,14 +54,7 @@ function inspectWebsite(store: WebStore, subject?: PluginInspectionSubject): Plu
   const tab = websiteTarget(store, subject)?.tab
   if (!tab) throw new Error(uiText('surfing.error.closedTab'))
   const metadata = tab.metadata ?? {}
-  let security = uiText('surfing.security.unavailable')
-  try {
-    security = new URL(tab.url).protocol === 'https:'
-      ? uiText('surfing.security.secure')
-      : uiText('surfing.security.notSecure')
-  } catch {
-    security = uiText('surfing.security.unavailable')
-  }
+  const security = uiText(`details.connection.${tab.connection?.status ?? 'unavailable'}`)
   return [
     { id: 'title', label: uiText('surfing.surface.title'), value: tab.title, readOnly: true },
     { id: 'url', label: uiText('surfing.surface.url'), value: tab.url, readOnly: true },

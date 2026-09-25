@@ -10,7 +10,8 @@ const EMPTY: WebSnapshot = {
   settings: DEFAULT_SETTINGS,
   favorites: [],
   readingList: [],
-  history: []
+  history: [],
+  agentActivity: []
 }
 const noopSubscribe = (): (() => void) => () => {}
 const emptySnapshot = (): WebSnapshot => EMPTY

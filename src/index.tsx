@@ -1,10 +1,4 @@
-/**
- * Web — an embedded browser plugin (core tier). Scaffold stage: registers the
- * left-sidebar panel and the main-workspace browser page, backed by a
- * session-scoped store. Later tasks add per-instance Notes tabs (one site per
- * tab), the persistent-webview overlay, profiles + history + settings, the
- * main-process `browser` driver, agentic `browser_*` tools and ad-blocking.
- */
+/** Surfing: website tabs with isolated profiles, web file views, page embeds, and assistant browsing and URL fetch tools. */
 import {
   BROWSER_AUTOMATION_V1,
   AGENT_TOOL_PROVIDER_V1,
@@ -19,10 +13,14 @@ import { createBrowserAutomationService, registerWebCommands } from './commands'
 import { registerWebFences } from './embeds'
 import { ensureEmbedProviders } from './embedProviders'
 import { Page } from './Page'
+import { UrlFileView } from './UrlFileView'
+import { MhtmlFileView, HarFileView } from './ArchiveFileViews'
 import { Panel } from './Panel'
 import { Settings } from './Settings'
 import { initLocalization, uiText } from './localization'
+import { createWebFetcher } from './webFetch'
 import { surfingAgentTools, registerBrowserAgentCommands } from './agentTools'
+import { registerSurfingDetails } from './workspaceDetails'
 import { registerSurfingSurfaces } from './surfaces'
 
 export function register(api: ValleyPluginApi): () => Promise<void> {
@@ -34,8 +32,10 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
   store.startOverlay()
   const ready = store.loadConfig()
   const providersReady = ready.then(() => active ? ensureEmbedProviders() : { providers: [], customized: [], issues: [] })
+  const offDetails = registerSurfingDetails(api, store)
   const offSurfaces = registerSurfingSurfaces(api, store, ready)
-  const offCommands = registerWebCommands(api, store)
+  const fetcher = createWebFetcher(api, store)
+  const offCommands = registerWebCommands(api, store, fetcher)
   const offNavigator = api.interop.services.provide(WEB_NAVIGATOR_V1, {
     open: ({ url, title, newTab }) => {
       const instanceId = store.openTab(url)
@@ -49,7 +49,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
   const browserAutomation = createBrowserAutomationService(api, store)
   const offBrowserAutomation = api.interop.services.provide(BROWSER_AUTOMATION_V1, browserAutomation)
   const offAgentCommands = registerBrowserAgentCommands(api, browserAutomation)
-  const offAgentTools = api.interop.services.provide(AGENT_TOOL_PROVIDER_V1, surfingAgentTools(browserAutomation, api))
+  const offAgentTools = api.interop.services.provide(AGENT_TOOL_PROVIDER_V1, surfingAgentTools(browserAutomation, api, fetcher))
   let disposal: Promise<void> | undefined
   let offNewTab: (() => void) | null = null
   const syncNewTabHandler = (): void => {
@@ -74,6 +74,9 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
   const offFences = registerWebFences(providersReady)
 
   api.registerView('surfing.page', Page)
+  api.registerView('surfing.url', UrlFileView)
+  api.registerView('surfing.mhtml', MhtmlFileView)
+  api.registerView('surfing.har', HarFileView)
   api.registerView('surfing.panel', Panel)
   api.registerView('surfing.settings', Settings)
 
@@ -86,6 +89,7 @@ export function register(api: ValleyPluginApi): () => Promise<void> {
     offBrowserAutomation()
     offAgentTools()
     offAgentCommands()
+    offDetails()
     offSurfaces()
     const commandsDrained = offCommands()
     offFences()

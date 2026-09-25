@@ -1,11 +1,14 @@
 import { uiText } from './localization'
 import {
   createAgentToolProvider,
+  type AgentToolDefinition,
   type AgentToolOutput,
   type AgentToolProvider,
   type ValleyPluginApi,
   type BrowserAutomationService
 } from '@valley/plugin-sdk'
+import { FETCH_INPUT_SCHEMA, parseFetchInput } from './commands'
+import { formatFetchResult, type WebFetcher, type WebFetchPage } from './webFetch'
 
 const schema = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: 'object', properties, required, additionalProperties: false
@@ -19,8 +22,46 @@ const action = async (promise: Promise<{ ok: boolean; error?: string; data?: { i
   return result.ok ? result.data?.info ?? 'Done.' : error(result.error)
 }
 const clip = (value: string, max = 8000) => value.length > max ? `${value.slice(0, max)}\n…(truncated)` : value
+const FETCH_TOOL = 'browser_fetch_url'
 
-function browserTools(service: BrowserAutomationService): AgentToolProvider {
+/** Canonical English palette labels; `surfing.command.<command id>` localizes them. */
+const COMMAND_LABELS: Record<string, string> = {
+  browser_list_tabs: 'Surfing: List browser tabs',
+  browser_open_tab: 'Surfing: Open a URL in a new browser tab',
+  browser_switch_tab: 'Surfing: Reveal a browser tab',
+  browser_close_tab: 'Surfing: Close a browser tab',
+  browser_snapshot: 'Surfing: Read the interactive page snapshot',
+  browser_read_page: 'Surfing: Read visible page text',
+  browser_screenshot: 'Surfing: Capture a page screenshot',
+  browser_navigate: 'Surfing: Navigate a browser tab',
+  browser_back: 'Surfing: Go back in a browser tab',
+  browser_forward: 'Surfing: Go forward in a browser tab',
+  browser_reload: 'Surfing: Reload a browser tab',
+  browser_click: 'Surfing: Click a page element',
+  browser_type: 'Surfing: Type into a page element',
+  browser_select: 'Surfing: Select a dropdown option',
+  browser_scroll: 'Surfing: Scroll a browser tab',
+  browser_press_key: 'Surfing: Press a key in a browser tab'
+}
+
+function fetchTool(run: AgentToolDefinition['run']): AgentToolDefinition {
+  return {
+    name: FETCH_TOOL,
+    description: 'Fetch a web page or text resource by URL and return its readable content as Markdown. HTML is reduced to the main article with absolute links; JSON, Markdown and plain text pass through. Runs in the background without cookies and appears live in the Surfing sidebar. Long results are paged: pass the reported startIndex to continue. Set render to true only when a page needs JavaScript to show its content; it then loads in a visible Surfing tab and may need confirmation.',
+    parameters: schema({ ...FETCH_INPUT_SCHEMA.properties, render: { type: 'boolean', description: 'Load the page in a visible Surfing tab and read the rendered result' } }, ['url']),
+    sideEffect: 'read',
+    commandDispatch: 'dynamic',
+    timeoutMs: 120_000,
+    run
+  }
+}
+
+function fetchInput(args: Record<string, unknown>) {
+  const { render: _render, ...input } = args
+  return parseFetchInput(input)
+}
+
+function browserTools(service: BrowserAutomationService, fetcher?: WebFetcher): AgentToolProvider {
   const unknownTab = async (instanceId: string): Promise<string> => {
     const result = await service.list()
     const open = result.ok ? (result.data?.tabs ?? []).map((tab) => tab.instanceId) : []
@@ -121,11 +162,44 @@ function browserTools(service: BrowserAutomationService): AgentToolProvider {
       (id, args) => action(service.scroll(id, Number(args.dx) || 0, args.dy == null ? 600 : Number(args.dy))),
       { dx: { type: 'number' }, dy: { type: 'number' } }),
     tabTool('browser_press_key', 'Send a key to the focused element in a Surfing tab.',
-      (id, args) => action(service.pressKey(id, str(args.key))), { key: text('Key name') }, ['key'])
+      (id, args) => action(service.pressKey(id, str(args.key))), { key: text('Key name') }, ['key']),
+    ...(fetcher ? [fetchTool(async (args) => {
+      try {
+        const input = fetchInput(args)
+        return formatFetchResult(await (args.render === true ? fetcher.fetchRendered(input) : fetcher.fetch(input)))
+      } catch (failure) {
+        return error(failure instanceof Error ? failure.message : String(failure))
+      }
+    })] : [])
   ])
 }
 
 const commandId = (name: string): string => name.replaceAll('_', '-')
+
+function usage(name: string, parameters: Record<string, unknown>): string {
+  const properties = parameters.properties as Record<string, { type?: string }>
+  const required = new Set(parameters.required as string[])
+  const parts = Object.entries(properties).map(([key, field]) => {
+    if (key === 'instanceId') return '<instanceId>'
+    const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}${field.type === 'boolean' ? '' : ` <${key}>`}`
+    return required.has(key) ? flag : `[${flag}]`
+  })
+  return ['surfing', commandId(name), ...parts].join(' ')
+}
+
+function fromCli(parameters: Record<string, unknown>) {
+  const properties = parameters.properties as Record<string, { type?: string }>
+  const names = new Map(Object.keys(properties).map((key) => [key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`), key]))
+  return (args: string[], flags: Record<string, string | boolean>): unknown => {
+    const input: Record<string, unknown> = 'instanceId' in properties && args[0] !== undefined ? { instanceId: args[0] } : {}
+    for (const [flag, raw] of Object.entries(flags)) {
+      const key = names.get(flag) ?? flag
+      const type = properties[key]?.type
+      input[key] = type === 'number' ? Number(raw) : type === 'boolean' ? raw === true || raw === 'true' : raw
+    }
+    return input
+  }
+}
 
 export function registerBrowserAgentCommands(api: ValleyPluginApi, service: BrowserAutomationService): () => void {
   const provider = browserTools(service)
@@ -142,8 +216,9 @@ export function registerBrowserAgentCommands(api: ValleyPluginApi, service: Brow
     browser_press_key: (input) => service.pressKey(tabId(input), str(input.key))
   }
   const offs = provider.tools.map((tool) => api.commands.register({
-    id: commandId(tool.name), label: `Surfing: ${tool.description}`, paletteSafe: false, sideEffect: tool.sideEffect, timeoutMs: tool.timeoutMs,
-    input: { schema: tool.parameters, parse: (raw) => {
+    id: commandId(tool.name), label: COMMAND_LABELS[tool.name], labelKey: `surfing.command.${commandId(tool.name)}`,
+    paletteSafe: false, agentVisibility: 'hidden', sideEffect: tool.sideEffect, timeoutMs: tool.timeoutMs, usage: usage(tool.name, tool.parameters),
+    input: { schema: tool.parameters, fromCli: fromCli(tool.parameters), parse: (raw) => {
       const value = raw === undefined ? {} : raw
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(uiText('surfing.error.input'))
       const input = value as Record<string, unknown>
@@ -176,10 +251,14 @@ export function registerBrowserAgentCommands(api: ValleyPluginApi, service: Brow
   return () => offs.forEach((off) => off())
 }
 
-export function surfingAgentTools(service: BrowserAutomationService, api?: ValleyPluginApi): AgentToolProvider {
-  const provider = browserTools(service)
+export function surfingAgentTools(service: BrowserAutomationService, api?: ValleyPluginApi, fetcher?: WebFetcher): AgentToolProvider {
+  const provider = browserTools(service, fetcher)
   if (!api) return provider
-  return createAgentToolProvider(provider.tools.map((tool) => ({
+  return createAgentToolProvider(provider.tools.map((tool) => tool.name === FETCH_TOOL ? fetchTool(async (args, context) => {
+    const result = await api.commands.executeOwn(args.render === true ? 'fetch-rendered' : 'fetch', fetchInput(args), { ...context, autonomous: true })
+    if (!result.ok) throw new Error(result.error.message)
+    return formatFetchResult(result.value as WebFetchPage)
+  }) : ({
     ...tool, commandId: commandId(tool.name),
     run: async (input, context) => {
       const result = await api.commands.executeOwn(commandId(tool.name), input, { ...context, autonomous: true })

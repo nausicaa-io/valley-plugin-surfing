@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { createMockValleyApi } from './mock'
 import { register } from '../src/index'
 import { registerWebCommands } from '../src/commands'
+import { createWebFetcher } from '../src/webFetch'
 import { initRuntime } from '../src/runtime'
 import { createStore, disposeStore, getStore, toUrl } from '../src/store'
 import { clearWebContext, publishWebContext, requestWebNoteFromSelection } from '../src/webContext'
@@ -363,11 +364,11 @@ describe('web plugin', () => {
     ])
     const websiteFields = await segments[0].inspect!({ relPath: '', kind: 'unsupported', subject })
     expect(websiteFields.every((field) => field.readOnly === true)).toBe(true)
-    expect(websiteFields.find((field) => field.id === 'security')).toMatchObject({ value: 'Secure' })
+    expect(websiteFields.find((field) => field.id === 'security')).toMatchObject({ value: 'Unavailable' })
     const { container } = render(React.createElement(React.Fragment, null, segments[0].render({ relPath: '', kind: 'unsupported', subject })))
     expect(await screen.findByText('Example')).toBeTruthy()
     expect(screen.getByText('https://example.com/')).toBeTruthy()
-    expect(screen.getByText('Secure')).toBeTruthy()
+    expect(screen.getByText('Unavailable')).toBeTruthy()
     expect(screen.getByText('https://example.com/favicon.ico')).toBeTruthy()
     expect(screen.getByText('en-CH')).toBeTruthy()
     expect(container.querySelector('.web-metadata-icon img')).toHaveAttribute('src', 'https://example.com/favicon.ico')
@@ -1194,7 +1195,7 @@ describe('clipping document revisions', () => {
       url: 'https://example.test/forest', title: 'Forest field notes',
       html: `<html><head><title>Forest field notes</title></head><body><article><h1>Forest field notes</h1><p>${'The forest study records moss, ferns and diverse woodland habitats. '.repeat(8)}</p></article></body></html>`
     } })
-    const unregister = registerWebCommands(mock.api, store)
+    const unregister = registerWebCommands(mock.api, store, createWebFetcher(mock.api, store))
     disposers.push(async () => { await unregister(); await disposeStore(mock.api, store) })
     const clip = (collision = 'overwrite') => mock.api.commands.execute('surfing:clip', { instanceId: 'source', collision })
     return { ...mock, store, unregister, clip }

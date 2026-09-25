@@ -13,6 +13,29 @@ const CSS = `
 .web-toolbar-profile .web-profile-mark svg { width:14px; height:14px; }
 .web-host { flex:1; min-height:0; position:relative; display:flex; }
 .web-host webview, .web-host .web-guest { flex:1; width:100%; height:100%; border:0; }
+.web-shortcut-message { padding:var(--space-3); color:var(--text-secondary); font-size:0.75rem; }
+.web-shortcut-message[role="alert"] { color:var(--negative-color); }
+.web-archive { min-width:0; min-height:0; overflow:hidden; color:var(--text-color); }
+.web-archive-label { flex:1; font-size:0.75rem; color:var(--text-secondary); }
+.web-archive-frame { flex:1; width:100%; min-height:0; border:0; background:var(--surface-color); }
+.web-har-pagination { display:flex; align-items:center; gap:var(--space-2); padding:var(--space-2) var(--space-3); font-size:0.75rem; border-bottom:1px solid var(--border-light); }
+.web-har-pagination > span:first-child { flex:1; }
+.web-archive button:disabled { opacity:.45; cursor:default; }
+.web-har-content { flex:1; min-height:0; display:flex; flex-direction:column; }
+.web-har-list { flex:1; min-height:120px; overflow:auto; }
+.web-har-list table { width:100%; border-collapse:collapse; font-size:0.75rem; }
+.web-har-list th { position:sticky; top:0; z-index:1; background:var(--container-color-alt); text-align:left; }
+.web-har-list th, .web-har-list td { padding:var(--space-2) var(--space-3); border-bottom:1px solid var(--border-light); white-space:nowrap; }
+.web-har-list tr:hover, .web-har-list tr.is-selected { background:var(--hover-bg); }
+.web-har-list td { cursor:pointer; }
+.web-har-url { display:block; max-width:36rem; padding:0; border:0; background:none; color:var(--accent-color); font:inherit; text-align:left; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+.web-har-details { flex:1; min-height:0; overflow:auto; padding:var(--space-3); border-top:1px solid var(--border-medium); font-size:0.75rem; overflow-wrap:anywhere; }
+.web-har-details h2 { font-size:0.875rem; margin:0 0 var(--space-2); }
+.web-har-details h3 { font-size:0.75rem; margin:var(--space-3) 0 var(--space-2); }
+.web-har-details pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:0.75rem; }
+.web-har-pairs { display:grid; grid-template-columns:minmax(7rem, 1fr) minmax(0, 3fr); gap:var(--space-1) var(--space-3); }
+.web-har-pairs dt { color:var(--text-secondary); }
+.web-har-pairs dd { margin:0; white-space:pre-wrap; }
 
 /* Favorite star in the page toolbar (reuses .web-nav-btn sizing). */
 .web-star.is-active { color:var(--accent-color); }
@@ -60,6 +83,16 @@ const CSS = `
 .web-list-remove { flex:0 0 auto; width:22px; height:22px; margin-right:2px; padding:0; border:none; border-radius:5px; background:none; color:var(--text-tertiary); font-size:16px; line-height:1; cursor:pointer; opacity:0; -webkit-app-region:no-drag; }
 .web-list-row:hover .web-list-remove, .web-list-row:focus-within .web-list-remove { opacity:1; }
 .web-list-remove:hover { background:var(--container-color); color:var(--text-color); }
+.web-list-tab { position:relative; }
+.web-list-tab-dot { position:absolute; top:3px; right:3px; width:6px; height:6px; border-radius:50%; background:var(--accent-color); animation:web-activity-pulse 1.2s ease-in-out infinite; }
+.web-activity-mark { display:flex; align-items:center; justify-content:center; flex:0 0 auto; width:16px; margin-left:8px; color:var(--text-tertiary); }
+.web-activity-row .web-list-open { padding-left:6px; }
+.web-activity-row.is-done .web-activity-mark { color:var(--positive-color, var(--accent-color)); }
+.web-activity-row.is-error .web-activity-mark, .web-activity-row.is-error .web-list-url { color:var(--negative-color); }
+.web-activity-spinner { width:10px; height:10px; border:1.5px solid var(--border-medium); border-top-color:var(--accent-color); border-radius:50%; animation:web-activity-spin .8s linear infinite; }
+@keyframes web-activity-spin { to { transform:rotate(360deg); } }
+@keyframes web-activity-pulse { 0%, 100% { opacity:1; } 50% { opacity:.35; } }
+@media (prefers-reduced-motion: reduce) { .web-activity-spinner, .web-list-tab-dot { animation:none; } }
 
 /* ── Settings (surfing.settings — General / Privacy & Ad-block / Profiles) ──────
    Layout only. Every control here is the settings kit's, on the shared

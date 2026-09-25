@@ -1,6 +1,7 @@
 import { React, api } from './runtime'
 import type { FC, ReactNode } from 'react'
-import { getStore } from './store'
+import { getStore, type WebAgentActivity } from './store'
+import { formatBytes } from './webFetch'
 import { useWeb, useActiveWebContext, useHostDateFormat } from './hooks'
 import {
   formatHistoryTimestamp,
@@ -38,7 +39,28 @@ const TimelineIcon: FC = () => (
   </svg>
 )
 
-type ListKind = 'favorites' | 'reading' | 'timeline'
+/** A sparkle glyph for the Assistant (fetch activity) tab. */
+const AssistantIcon: FC = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+    <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" />
+  </svg>
+)
+
+const CheckIcon: FC = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+)
+
+const FailedIcon: FC = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+)
+
+type ListKind = 'favorites' | 'reading' | 'timeline' | 'assistant'
 
 function timelineGroupLabel(key: TimelineGroupKey): string {
   switch (key) {
@@ -63,8 +85,8 @@ function timelineGroupLabel(key: TimelineGroupKey): string {
   }
 }
 
-/** Favorites/Reading list/Timeline switcher as icon tabs (mirrors the Clock plugin's tab strip). */
-const ListTabs: FC<{ active: ListKind; onSelect: (kind: ListKind) => void }> = ({ active, onSelect }) => (
+/** Favorites/Reading list/Timeline/Assistant switcher as icon tabs (mirrors the Clock plugin's tab strip). */
+const ListTabs: FC<{ active: ListKind; fetching: boolean; onSelect: (kind: ListKind) => void }> = ({ active, fetching, onSelect }) => (
   <div className="web-list-tabs">
     <button
       className={`web-list-tab${active === 'favorites' ? ' active' : ''}`}
@@ -89,6 +111,46 @@ const ListTabs: FC<{ active: ListKind; onSelect: (kind: ListKind) => void }> = (
       onClick={() => onSelect('timeline')}
     >
       <TimelineIcon />
+    </button>
+    <button
+      className={`web-list-tab${active === 'assistant' ? ' active' : ''}`}
+      title={uiText('surfing.activity.title')}
+      aria-label={fetching ? uiText('surfing.activity.titleBusy') : uiText('surfing.activity.title')}
+      aria-pressed={active === 'assistant'}
+      onClick={() => onSelect('assistant')}
+    >
+      <AssistantIcon />
+      {fetching && <span className="web-list-tab-dot" aria-hidden="true" />}
+    </button>
+  </div>
+)
+
+function formatDuration(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`
+}
+
+function activityDetail(entry: WebAgentActivity): string {
+  const host = hostOf(entry.url)
+  if (entry.state === 'running') return `${host} · ${uiText(entry.mode === 'rendered' ? 'surfing.activity.rendering' : 'surfing.activity.fetching')}`
+  if (entry.state === 'error') return `${host} · ${uiText(`surfing.activity.error.${entry.error ?? 'network'}`)}`
+  return [
+    host,
+    entry.status == null ? null : String(entry.status),
+    entry.bytes == null ? null : formatBytes(entry.bytes),
+    entry.durationMs == null ? null : formatDuration(entry.durationMs),
+    entry.mode === 'rendered' ? uiText('surfing.activity.rendered') : null,
+    entry.cached ? uiText('surfing.activity.cached') : null
+  ].filter(Boolean).join(' · ')
+}
+
+const ActivityRow: FC<{ entry: WebAgentActivity; onOpen: (e: React.MouseEvent) => void }> = ({ entry, onOpen }) => (
+  <div className={`web-list-row web-activity-row is-${entry.state}`} title={entry.url}>
+    <span className="web-activity-mark" aria-label={uiText(`surfing.activity.state.${entry.state}`)}>
+      {entry.state === 'running' ? <span className="web-activity-spinner" /> : entry.state === 'done' ? <CheckIcon /> : <FailedIcon />}
+    </span>
+    <button className="web-list-open" onClick={onOpen}>
+      <span className="web-list-title">{entry.state === 'running' ? hostOf(entry.url) : entry.title || entry.url}</span>
+      <span className="web-list-url">{activityDetail(entry)}</span>
     </button>
   </div>
 )
@@ -250,6 +312,15 @@ export const Panel: FC = () => {
     void getStore()?.addToReadingList(activeId, { url: activeWeb.url, title: activeWeb.title, ts: Date.now() })
   }
 
+  /** A rendered fetch reveals its visible tab; any other fetch opens its page like a saved row. */
+  const openActivity = (entry: WebAgentActivity, e: React.MouseEvent): void => {
+    if (entry.instanceId && snap.tabs[entry.instanceId]) {
+      api.workspace.openMainTab({ instanceId: entry.instanceId })
+      return
+    }
+    openPage({ url: entry.url, title: entry.title, ts: entry.ts }, e)
+  }
+
   const clearHistory = async (): Promise<void> => {
     const choice = await api.ui.confirm({
       title: uiText('surfing.history.clearTitle'),
@@ -277,7 +348,7 @@ export const Panel: FC = () => {
         </button>
       </div>
 
-      <ListTabs active={listKind} onSelect={setListKind} />
+      <ListTabs active={listKind} fetching={snap.agentActivity.some((entry) => entry.state === 'running')} onSelect={setListKind} />
 
       {listKind === 'favorites' && (
         <ListPane>
@@ -345,6 +416,25 @@ export const Panel: FC = () => {
                   />
                 ))}
               </div>
+            ))
+          )}
+        </ListPane>
+      )}
+
+      {listKind === 'assistant' && (
+        <ListPane
+          action={
+            snap.agentActivity.some((entry) => entry.state !== 'running') && (
+              <button className="web-link-btn" onClick={() => getStore()?.clearAgentActivity()}>
+                {uiText('surfing.activity.clear')}</button>
+            )
+          }
+        >
+          {snap.agentActivity.length === 0 ? (
+            <div className="web-empty">{uiText('surfing.activity.empty')}</div>
+          ) : (
+            snap.agentActivity.map((entry) => (
+              <ActivityRow key={entry.id} entry={entry} onOpen={(e) => openActivity(entry, e)} />
             ))
           )}
         </ListPane>
